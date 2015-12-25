@@ -174,7 +174,7 @@ let sgemm2 transa transb (alpha: floatType) (A:dMatrix) (B:dMatrix) beta (C:dMat
     let ldc = m
 
     let C_dArray = C.dArray
-    if int C.dArray.Size <> m*n then failwith "C.dArray.Length <> m*n in sgemm2"
+    if int C.dArray.Size < m*n then failwith "C.dArray.Size < m*n in sgemm2"
     if m <> C.num_rows || n <> C.num_cols then failwith "m <> C.num_rows || n <> C.num_cols in sgemm2"
     cublas.Gemm(transa, transb, m, n, k, alpha, A.dArray, lda, B.dArray, ldb, beta, C_dArray, ldc)
 

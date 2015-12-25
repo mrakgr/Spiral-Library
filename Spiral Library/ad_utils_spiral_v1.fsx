@@ -65,7 +65,7 @@ type dMatrix =
     {
     mutable num_rows:int
     mutable num_cols:int
-    mutable dArray: CudaDeviceVariable<floatType>
+    dArray: CudaDeviceVariable<floatType>
     }  
 
     /// The main create function. A substitute for the constructor.
@@ -105,7 +105,8 @@ type dMatrix =
         c.dArray.AsyncCopyToDevice(t.dArray,str)
         c
 
-    /// Returns a dMatrix.create if the current one is less than nr*nc. Otherwise it returns self with the num_rows and num_cols adjusted.
+    // Note: The ReplaceIf function could be written in a more functional manner without the use of option types, but it would clog up the GC.
+    /// Returns a new dMatrix if the current one is less than nr*nc. Otherwise it returns self with the num_rows and num_cols adjusted.
     member inline t.ReplaceIf nr nc =
         if int t.dArray.Size < nr*nc then
             (t :> IDisposable).Dispose()
@@ -136,7 +137,7 @@ type dMatrix =
     // when handling device memory.
     override t.Finalize() = (t :> IDisposable).Dispose()
 
-    /// An instance of an empty dMatrix.
+/// An instance of an empty dMatrix.
 let empty = dMatrix.create(0,0,CudaDeviceVariable.Null)
 
 let T = Operation.Transpose
@@ -1655,5 +1656,7 @@ type dMatrix with
             use t' = sgeam T T 1.0f t 0.0f t // Transpose
             t'.dArray.CopyToHost(h_a)
             h_a
+
+
 
 

@@ -5,6 +5,16 @@ VisualStudioVersion = 14.0.23107.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Spiral Library", "Spiral Library\Spiral Library.fsproj", "{75F19417-A9FC-4DDB-BB7E-D09449E0E186}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{4D4C7A24-B94E-4E79-BD56-C5F6E3705C9B}"
+	ProjectSection(SolutionItems) = preProject
+		readme.md = readme.md
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tutorial Examples", "Tutorial Examples", "{2E1EFD51-A072-4E31-8C4B-7AFBD99D6B73}"
+	ProjectSection(SolutionItems) = preProject
+		Tutorial examples\post4.fsx = Tutorial examples\post4.fsx
+	EndProjectSection
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU

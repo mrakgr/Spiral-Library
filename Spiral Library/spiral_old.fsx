@@ -5,9 +5,10 @@
 #r "../packages/ManagedCuda-75-x64.7.5.7/lib/net45/x64/CudaBlas.dll"
 #r "../packages/ManagedCuda-75-x64.7.5.7/lib/net45/x64/CudaRand.dll"
 #r "../packages/ManagedCuda-75-x64.7.5.7/lib/net45/x64/NPP.dll"
+
 #r "../packages/ManagedCuda-CudaDNN.3.0/lib/net45/CudaDNN.dll"
 
-// Open up the namespaces.
+
 open ManagedCuda
 open ManagedCuda.BasicTypes
 open ManagedCuda.VectorTypes
@@ -20,124 +21,113 @@ open System
 open System.IO
 open System.Collections
 
-// Initialize the context. Analogous to a CPU process. Cuda tries to offload as much as possible during context creation so there aren't
-// any unexpected delays later.
 let ctx = new CudaContext()
 let numSm = ctx.GetDeviceInfo().MultiProcessorCount // The number of streaming multiprocessors on the device.
 
-// Make a stream class.
 let str = new CudaStream()
-// Set the Cuda libraries handles to the above stream.
 let cublas = CudaBlas(str.Stream)
 let cudnn = new CudaDNN.CudaDNNContext()
 cudnn.SetStream(str)
 let cudaRandom = new CudaRand.CudaRandDevice(GeneratorType.PseudoDefault)
 cudaRandom.SetStream(str.Stream)
 
-// Type aliasing trick to make Spiral more generic. It is incomplete at the moment though due to Cuda math function being non-overloadable.
+let rng = System.Random()
+
+// I've done this type aliasing trick to make the DiffSharp backend generic. It might be worth bringing into Spiral.
 type floatType = float32
 let inline floatType x = float32 x
 let FloatTypeCpp = "float"
 
-/// Copies a host array to device.
+let Noop() = ()
+
 let inline to_dev (host_ar: 't []) =
     let d_a = new CudaDeviceVariable<'t>(SizeT host_ar.Length)    
     d_a.CopyToDevice(host_ar)
     d_a
 
-/// Copies a device array to host.
+let inline to_dev' (host_ar: 't [,]) =
+    let d_a = new CudaDeviceVariable<'t>(SizeT host_ar.Length)    
+    d_a.CopyToDevice(host_ar)
+    d_a
+
 let inline to_host (dev_ar: CudaDeviceVariable<'t>) =
     let h_a = Array.zeroCreate<'t> (int dev_ar.Size)
     dev_ar.CopyToHost(h_a)
     h_a
 
-/// Copies the device array to host. Extends the CudaDeviceVariable class.
 type CudaDeviceVariable<'t when 't: struct and 't: (new: unit -> 't) and 't:> System.ValueType> with
     member inline this.Gather() =
         to_host this
 
-/// Allocates a new device array without initializing it.
 let inline new_dev<'t when 't: struct and 't: (new: unit -> 't) and 't:> System.ValueType> (n: int) =
     new CudaDeviceVariable<'t>(SizeT n)
 
-/// The main matrix type.
-type dMatrix =
-    {
-    mutable num_rows:int
-    mutable num_cols:int
-    mutable dArray: CudaDeviceVariable<floatType>
-    }  
+type dMatrix(num_rows:int,num_cols:int,dArray: CudaDeviceVariable<floatType>) = 
+        new(num_rows: int,num_cols) =
+            let q = (num_rows*num_cols) |> SizeT
+            let t = new CudaDeviceVariable<floatType>(q)
+            new dMatrix(num_rows,num_cols,t)
 
-    /// The main create function. A substitute for the constructor.
-    static member create(num_rows: int,num_cols,dArray: CudaDeviceVariable<floatType>) =
-        {num_rows=num_rows;num_cols=num_cols;dArray=dArray}
+        new(num_rows: int,num_cols,dArray: floatType[]) =
+            let q = num_rows*num_cols
+            if dArray.Length <> q then failwith "Invalid size in dMatrix construction."
+            let t = to_dev dArray
+            new dMatrix(num_rows,num_cols,t)
 
-    /// Throws an exception if it tries to allocate an array of size 0.
-    static member create(num_rows: int,num_cols) =
-        let q = (num_rows*num_cols) |> SizeT
-        let t = new CudaDeviceVariable<floatType>(q)
-        {num_rows=num_rows;num_cols=num_cols;dArray=t}
+        member inline t.num_rows = num_rows
+        member inline t.num_cols = num_cols
+        member inline t.dArray = dArray
 
-    /// Copies a host to a device array.
-    /// Throws an exception if it tries to allocate an array of size 0.
-    static member create(num_rows: int,num_cols,dArray: floatType[]) =
-        let q = num_rows*num_cols
-        if dArray.Length <> q then failwith "Invalid size in dMatrix construction."
-        let t = to_dev dArray
-        {num_rows=num_rows;num_cols=num_cols;dArray=t}
+        member inline t.rc = t.num_rows, t.num_cols
+        /// Sets the matrix to zero.
+        member inline t.setZero() = t.dArray.MemsetAsync(0u,str.Stream)
+        /// Set the matrix to a value.
+        member inline t.set (x: floatType) = 
+            let v = BitConverter.ToUInt32(BitConverter.GetBytes(x),0)
+            t.dArray.MemsetAsync(v,str.Stream)
+        /// Creates a copy of this matrix with all the values set to zero.
+        member inline t.zeroLike() =
+            let c = new dMatrix(t.num_rows,t.num_cols)
+            c.setZero()
+            c
+        member inline t.copy() =
+            let c = new dMatrix(t.num_rows,t.num_cols)
+            c.dArray.AsyncCopyToDevice(t.dArray,str)
+            c
 
-    /// Returns num_rows, num_cols as a tuple
-    member inline t.rc = t.num_rows, t.num_cols
-    /// Sets the matrix to zero.
-    member inline t.setZero() = t.dArray.MemsetAsync(0u,str.Stream)
-    /// Set the matrix to a value.
-    member inline t.set (x: floatType) = 
-        let v = BitConverter.ToUInt32(BitConverter.GetBytes(x),0)
-        t.dArray.MemsetAsync(v,str.Stream)
-    /// Creates a copy of this matrix with all the values set to zero.
-    member inline t.zeroLike() =
-        let c = dMatrix.create(t.num_rows,t.num_cols)
-        c.setZero()
-        c
-    /// Copies a matrix.
-    member inline t.copy() =
-        let c = dMatrix.create(t.num_rows,t.num_cols)
-        c.dArray.AsyncCopyToDevice(t.dArray,str)
-        c
+        /// Returns a new dMatrix if the current one is less than nr*nc. Otherwise it returns self.
+        member inline t.ReplaceIf nr nc =
+            if num_rows*num_cols < nr*nc then
+                (t :> IDisposable).Dispose()
+                new dMatrix(nr,nc)
+            else
+                t
 
-    /// Returns a dMatrix.create if the current one is less than nr*nc. Otherwise it returns self with the num_rows and num_cols adjusted.
-    member inline t.ReplaceIf nr nc =
-        if int t.dArray.Size < nr*nc then
+        /// Outright disposes the matrix and returns a new one.
+        member inline t.Replace nr nc =
             (t :> IDisposable).Dispose()
-            Some (dMatrix.create(nr,nc,new_dev<floatType> (nr*nc)))
-        else
-            t.num_rows <- nr
-            t.num_cols <- nc
-            None
+            new dMatrix(nr,nc)
 
-    /// Copies a matrix to a host array.
-    member inline t.Gather() =
-        let h_a = Array.zeroCreate<floatType> (int t.dArray.Size)
-        t.dArray.CopyToHost(h_a)
-        h_a
+        member inline t.Gather() =
+            let h_a = Array.zeroCreate<floatType> (int t.dArray.Size)
+            t.dArray.CopyToHost(h_a)
+            h_a
 
-    member inline t.isEmpty = t.dArray.Equals(CudaDeviceVariable.Null)
+        member inline t.isEmpty = if t.num_rows = 0 then true else false
+        member inline t.Size = num_rows*num_cols
 
-    override t.ToString() =
-        sprintf "dM(%i,%i)" t.num_rows t.num_cols
+        override t.ToString() =
+            sprintf "dM(%i,%i)" t.num_rows t.num_cols
 
-    interface IDisposable with
-        member t.Dispose() = 
-            if t.isEmpty = false then
-                t.dArray.Dispose()
+        interface IDisposable with
+            member t.Dispose() = 
+                if t.dArray.Equals(CudaDeviceVariable.Null) then
+                    t.dArray.Dispose()
 
-    // Note: The native GC collector is not as sensitive to the device memory as it is to host memory.
-    // It will not get triggered if the GPU is running low, so it necessary to be more careful than usual
-    // when handling device memory.
-    override t.Finalize() = (t :> IDisposable).Dispose()
+        override t.Finalize() = (t :> IDisposable).Dispose()
 
-    /// An instance of an empty dMatrix.
-let empty = dMatrix.create(0,0,CudaDeviceVariable.Null)
+/// Empty dMatrix.
+let empty = new dMatrix(0,0,CudaDeviceVariable.Null)
 
 let T = Operation.Transpose
 let nT = Operation.NonTranspose
@@ -157,7 +147,7 @@ let sgemm transa transb (alpha: floatType) (A:dMatrix) (B:dMatrix) =
 
     let C_dArray = new CudaDeviceVariable<floatType>(m*n |> SizeT)
     cublas.Gemm(transa, transb, m, n, k, alpha, A.dArray, lda, B.dArray, ldb, 0.0f, C_dArray, ldc)
-    dMatrix.create(m,n,C_dArray)
+    new dMatrix(m,n,C_dArray)
 
 /// General matrix-matrix multiply from cuBLAS. Inplace version
 let sgemm2 transa transb (alpha: floatType) (A:dMatrix) (B:dMatrix) beta (C:dMatrix) =
@@ -194,7 +184,7 @@ let sgeam transa transb (alpha: floatType) (A:dMatrix) beta (B:dMatrix) =
     let C_dArray = new CudaDeviceVariable<floatType>(a_row*a_col |> SizeT)
     if A.dArray.Size <> B.dArray.Size then failwith "A.dArray.Length <> B.dArray.Length in sgeam"
     cublas.Geam(transa, transb, a_row, a_col, alpha, A.dArray, lda, B.dArray, ldb, beta, C_dArray, ldc)
-    dMatrix.create(a_row,a_col,C_dArray)
+    new dMatrix(a_row,a_col,C_dArray)
     
 
 /// General matrix-matrix addition.
@@ -269,7 +259,7 @@ type DeviceUnaryTransformModule(op: string) =
         kernel.RunAsync(str.Stream, x.DevicePointer,o.DevicePointer,n) |> ignore
 
     member t.A(x: dMatrix) =
-        let o = dMatrix.create(x.num_rows,x.num_cols)
+        let o = new dMatrix(x.num_rows,x.num_cols)
         t.A(x,o)
         o
 
@@ -329,7 +319,7 @@ type DeviceBinaryTransformModule(op: string) =
         kernel.RunAsync(str.Stream, x.DevicePointer,y.DevicePointer,o.DevicePointer,n) |> ignore
 
     member t.A(x: dMatrix, y: dMatrix) =
-        let o = dMatrix.create(x.num_rows,x.num_cols)
+        let o = new dMatrix(x.num_rows,x.num_cols)
         t.A(x,y,o)
         o
 
@@ -390,7 +380,7 @@ type DeviceTrinaryTransformModule(op: string) =
         kernel.RunAsync(str.Stream, x.DevicePointer,y.DevicePointer,z.DevicePointer,o.DevicePointer,n) |> ignore
 
     member t.A(x: dMatrix, y: dMatrix, z: dMatrix) =
-        let o = dMatrix.create(x.num_rows,x.num_cols)
+        let o = new dMatrix(x.num_rows,x.num_cols)
         t.A(x,y,z,o)
         o
 
@@ -581,7 +571,7 @@ type DeviceUnaryCoefTransformModule(op: string) =
         kernel.RunAsync(str.Stream, coef_x,x.DevicePointer,o.DevicePointer,n) |> ignore
 
     member t.A(coef_x, x: dMatrix) =
-        let o = dMatrix.create(x.num_rows,x.num_cols)
+        let o = new dMatrix(x.num_rows,x.num_cols)
         t.A(coef_x,x,o)
         o
 
@@ -641,7 +631,7 @@ type DeviceBinaryCoefTransformModule(op: string) =
         kernel.RunAsync(str.Stream, coef_x,x.DevicePointer,coef_y,y.DevicePointer,o.DevicePointer,n) |> ignore
 
     member t.A(coef_x, x: dMatrix, coef_y, y: dMatrix) =
-        let o = dMatrix.create(x.num_rows,x.num_cols)
+        let o = new dMatrix(x.num_rows,x.num_cols)
         t.A(coef_x,x,coef_y,y,o)
         o
 
@@ -663,7 +653,7 @@ let addBias (preactivations: dMatrix) (bias: dMatrix) =
     let alpha, beta = 1.f, 1.f
     let copy_preact = preactivations.copy()
     cudnn.AddTensor(alpha,biasTensorDesc,bias.dArray,beta,dstTensorDesc,copy_preact.dArray)
-    dMatrix.create(copy_preact.num_rows,copy_preact.num_cols,copy_preact.dArray)
+    new dMatrix(copy_preact.num_rows,copy_preact.num_cols,copy_preact.dArray)
     
 ///preactivations <- preactivations + bias (broadcast addition)
 let addBias2 beta (preactivations: dMatrix) alpha (bias: dMatrix) =
@@ -680,7 +670,7 @@ let calculateBias alpha (error: dMatrix) =
     let TensorFormat = cudnnTensorFormat.NHWC;
     dstTensorDesc.SetTensor4dDescriptor(TensorFormat, DataType, 1, error.num_rows, 1, error.num_cols)
     
-    let bias = dMatrix.create(error.num_rows,1)
+    let bias = new dMatrix(error.num_rows,1)
     biasTensorDesc.SetTensor4dDescriptor(TensorFormat, DataType, 1, bias.num_rows, 1, bias.num_cols)
     
     cudnn.ConvolutionBackwardBias(alpha/floatType error.num_cols,dstTensorDesc,error.dArray,0.0f,biasTensorDesc,bias.dArray)
@@ -712,7 +702,7 @@ type dMatrix with
         // 2.0f*scaling_factor ensures that it is rescaled around zero if the scaling_factor is 1.0f.
         randMapModule.A(2.0f*scaling_factor,cudaBuffer,location,cudaBuffer,cudaBuffer)
 
-        dMatrix.create(weights_num_rows,weights_num_cols,cudaBuffer)
+        new dMatrix(weights_num_rows,weights_num_cols,cudaBuffer)
 
     member t.fillRandomUniformMatrix (scaling_factor : floatType) location =
         let weights_total_size = t.num_rows*t.num_cols
@@ -754,18 +744,9 @@ type DM_rec = {
     member t.Resize nr nc =
         let p = t.P
         let a = t.A
-
-        // This is an optimization to prevent an clogup of dMatrix objects here.
-        // GC can't free up memory if the dMatrix instances are pointing to the same dArray.
-
-        // If the class is larger, replace the reference else the function will mutably just adjust
-        // the num_rows and num_col fields.
-        match (!p).ReplaceIf nr nc with
-        | Some x -> p := x
-        | None -> ()
-        match (!a).ReplaceIf nr nc with
-        | Some x -> a := x
-        | None -> ()
+        if (!p).Size < nr*nc then
+            p := (!p).Replace nr nc
+            a := (!a).Replace nr nc
         
 
 type Rf =
@@ -808,17 +789,17 @@ and RDM =
         | DMR(_,_,fb,_) -> fb()
 
     static member makeNode(hidden_size, input_size) =
-        let p = dMatrix.create(hidden_size,input_size)
+        let p = new dMatrix(hidden_size,input_size)
         DM (DM_rec.create p)
 
     static member makeNode(hidden_size, input_size, input: floatType[]) =
         if hidden_size*input_size <> input.Length then failwith "hidden_size*input_size <> input.Length in makeNode."
-        let p = dMatrix.create(hidden_size,input_size, input)
+        let p = new dMatrix(hidden_size,input_size, input)
         DM (DM_rec.create p)
 
     static member makeConstantNode(hidden_size, input_size, input: floatType[]) =
         if hidden_size*input_size <> input.Length then failwith "hidden_size*input_size <> input.Length in makeConstantNode."
-        let p = dMatrix.create(hidden_size,input_size, input)
+        let p = new dMatrix(hidden_size,input_size, input)
         DM (DM_rec.createConstant p)
 
     static member makeUniformRandomNode(hidden_size,input_size) =
@@ -1515,7 +1496,7 @@ type DeviceGetSliceModule() =
         let order = 0u
         let row_stride = end_row-start_row+1
         let col_stride = end_col-start_col+1
-        let y = dMatrix.create(row_stride, col_stride)
+        let y = new dMatrix(row_stride, col_stride)
         let n = row_stride*col_stride
         let gridSize = divup n block_size
         kernel.GridDimensions <- dim3(gridSize)
@@ -1531,7 +1512,7 @@ type DeviceGetSliceModule() =
         let order = 1u
         let row_stride = end_row-start_row+1
         let col_stride = end_col-start_col+1
-        let y = dMatrix.create(row_stride, col_stride)
+        let y = new dMatrix(row_stride, col_stride)
         let n = row_stride*col_stride
         let gridSize = divup n block_size
         kernel.GridDimensions <- dim3(gridSize)
@@ -1655,5 +1636,4 @@ type dMatrix with
             use t' = sgeam T T 1.0f t 0.0f t // Transpose
             t'.dArray.CopyToHost(h_a)
             h_a
-
 

@@ -1,4 +1,4 @@
-﻿// The Spiral library v1. Basic reverse mode AD on the GPU.
+﻿// Will be erased when I am done with the tutorial. Nothing important is here.
 
 #r "../packages/ManagedCuda-75-x64.7.5.7/lib/net45/x64/ManagedCuda.dll"
 #r "../packages/ManagedCuda-75-x64.7.5.7/lib/net45/x64/NVRTC.dll"
@@ -109,11 +109,15 @@ type dMatrix =
     member inline t.ReplaceIf nr nc =
         if int t.dArray.Size < nr*nc then
             (t :> IDisposable).Dispose()
-            Some (dMatrix.create(nr,nc,new_dev<floatType> (nr*nc)))
+            t.dArray <- new_dev<floatType> (nr*nc)
         else
             t.num_rows <- nr
             t.num_cols <- nc
-            None
+
+    /// Outright disposes the matrix and returns a new one.
+    member inline t.Replace nr nc =
+        (t :> IDisposable).Dispose()
+        dMatrix.create(nr,nc)
 
     /// Copies a matrix to a host array.
     member inline t.Gather() =
@@ -128,7 +132,7 @@ type dMatrix =
 
     interface IDisposable with
         member t.Dispose() = 
-            if t.isEmpty = false then
+            if t.dArray.Equals(CudaDeviceVariable.Null) = false then
                 t.dArray.Dispose()
 
     // Note: The native GC collector is not as sensitive to the device memory as it is to host memory.
@@ -136,7 +140,7 @@ type dMatrix =
     // when handling device memory.
     override t.Finalize() = (t :> IDisposable).Dispose()
 
-    /// An instance of an empty dMatrix.
+/// Empty dMatrix.
 let empty = dMatrix.create(0,0,CudaDeviceVariable.Null)
 
 let T = Operation.Transpose
@@ -754,18 +758,8 @@ type DM_rec = {
     member t.Resize nr nc =
         let p = t.P
         let a = t.A
-
-        // This is an optimization to prevent an clogup of dMatrix objects here.
-        // GC can't free up memory if the dMatrix instances are pointing to the same dArray.
-
-        // If the class is larger, replace the reference else the function will mutably just adjust
-        // the num_rows and num_col fields.
-        match (!p).ReplaceIf nr nc with
-        | Some x -> p := x
-        | None -> ()
-        match (!a).ReplaceIf nr nc with
-        | Some x -> a := x
-        | None -> ()
+        (!p).ReplaceIf nr nc
+        (!a).ReplaceIf nr nc
         
 
 type Rf =

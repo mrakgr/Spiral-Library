@@ -65,7 +65,7 @@ type dMatrix =
     {
     mutable num_rows:int
     mutable num_cols:int
-    dArray: CudaDeviceVariable<floatType>
+    mutable dArray: CudaDeviceVariable<floatType>
     }  
 
     /// The main create function. A substitute for the constructor.
@@ -86,6 +86,10 @@ type dMatrix =
         let t = to_dev dArray
         {num_rows=num_rows;num_cols=num_cols;dArray=t}
 
+    /// Returns a new instance of an (dMatrix.createEmpty) dMatrix.
+    /// Unlike the let statements, the member statements are always reevaluated.
+    static member createEmpty = dMatrix.create(0,0,CudaDeviceVariable.Null)
+
     /// Returns num_rows, num_cols as a tuple
     member inline t.rc = t.num_rows, t.num_cols
     /// Sets the matrix to zero.
@@ -105,16 +109,17 @@ type dMatrix =
         c.dArray.AsyncCopyToDevice(t.dArray,str)
         c
 
-    // Note: The ReplaceIf function could be written in a more functional manner without the use of option types, but it would clog up the GC.
-    /// Returns a new dMatrix if the current one is less than nr*nc. Otherwise it returns self with the num_rows and num_cols adjusted.
+    /// Resized the dArray if the current one is less than nr*nc. Otherwise it only adjusts num_rows and num_cols.
     member inline t.ReplaceIf nr nc =
-        if int t.dArray.Size < nr*nc then
+        if int t.dArray.Size < nr*nc 
+        then
             (t :> IDisposable).Dispose()
-            Some (dMatrix.create(nr,nc,new_dev<floatType> (nr*nc)))
+            t.num_rows <- nr
+            t.num_cols <- nc
+            t.dArray <- new_dev (nr*nc)
         else
             t.num_rows <- nr
             t.num_cols <- nc
-            None
 
     /// Copies a matrix to a host array.
     member inline t.Gather() =
@@ -124,30 +129,21 @@ type dMatrix =
 
     member inline t.isEmpty = t.dArray.Equals(CudaDeviceVariable.Null)
 
-    override t.ToString() =
-        sprintf "dM(%i,%i)" t.num_rows t.num_cols
-
+    /// The unmanaged Cuda memory has to be freed explicitly or by letting go of the context by resetting  the F# Interactive.
+    /// Finalizers work really poorly and can lead to unpredictable bugs when used to manage Cuda memory.
     interface IDisposable with
         member t.Dispose() = 
             if t.isEmpty = false then
                 t.dArray.Dispose()
 
-    // Note: The native GC collector is not as sensitive to the device memory as it is to host memory.
-    // It will not get triggered if the GPU is running low, so it necessary to be more careful than usual
-    // when handling device memory.
-    override t.Finalize() = (t :> IDisposable).Dispose()
-
-/// An instance of an empty dMatrix.
-let empty = dMatrix.create(0,0,CudaDeviceVariable.Null)
-
 let T = Operation.Transpose
 let nT = Operation.NonTranspose
 
 /// General matrix-matrix multiply from cuBLAS.
-let sgemm transa transb (alpha: floatType) (A:dMatrix) (B:dMatrix) =
+let gemm transa transb (alpha: floatType) (A:dMatrix) (B:dMatrix) =
     let a_col = if transa = nT then A.num_cols else A.num_rows
     let b_row = if transb = nT then B.num_rows else B.num_cols
-    if a_col <> b_row then failwith (sprintf "a_col <> b_row in sgemm! %i <> %i" a_col b_row)
+    if a_col <> b_row then failwith (sprintf "a_col <> b_row in gemm! %i <> %i" a_col b_row)
     let m = if transa = nT then A.num_rows else A.num_cols
     let n = if transb = nT then B.num_cols else B.num_rows
     let k = a_col
@@ -161,10 +157,10 @@ let sgemm transa transb (alpha: floatType) (A:dMatrix) (B:dMatrix) =
     dMatrix.create(m,n,C_dArray)
 
 /// General matrix-matrix multiply from cuBLAS. Inplace version
-let sgemm2 transa transb (alpha: floatType) (A:dMatrix) (B:dMatrix) beta (C:dMatrix) =
+let gemm2 transa transb (alpha: floatType) (A:dMatrix) (B:dMatrix) beta (C:dMatrix) =
     let a_col = if transa = nT then A.num_cols else A.num_rows
     let b_row = if transb = nT then B.num_rows else B.num_cols
-    if a_col <> b_row then failwith (sprintf "a_col <> b_row in sgemm! %i <> %i" a_col b_row)
+    if a_col <> b_row then failwith (sprintf "a_col <> b_row in gemm! %i <> %i" a_col b_row)
     let m = if transa = nT then A.num_rows else A.num_cols
     let n = if transb = nT then B.num_cols else B.num_rows
     let k = a_col
@@ -174,46 +170,108 @@ let sgemm2 transa transb (alpha: floatType) (A:dMatrix) (B:dMatrix) beta (C:dMat
     let ldc = m
 
     let C_dArray = C.dArray
-    if int C.dArray.Size < m*n then failwith "C.dArray.Size < m*n in sgemm2"
-    if m <> C.num_rows || n <> C.num_cols then failwith "m <> C.num_rows || n <> C.num_cols in sgemm2"
+    if m <> C.num_rows || n <> C.num_cols then failwith "m <> C.num_rows || n <> C.num_cols in gemm2"
     cublas.Gemm(transa, transb, m, n, k, alpha, A.dArray, lda, B.dArray, ldb, beta, C_dArray, ldc)
 
 /// General matrix-matrix addition.
-let sgeam transa transb (alpha: floatType) (A:dMatrix) beta (B:dMatrix) =
+let geam transa transb (alpha: floatType) (A:dMatrix) beta (B:dMatrix) =
     let a_row = if transa = nT then A.num_rows else A.num_cols
     let a_col = if transa = nT then A.num_cols else A.num_rows
     let b_row = if transb = nT then B.num_rows else B.num_cols
     let b_col = if transb = nT then B.num_cols else B.num_rows
         
-    if a_row <> b_row then failwith (sprintf "a_row <> b_row in sgeam! %i <> %i" a_row b_row)
-    if a_col <> b_col then failwith (sprintf "a_col <> b_col in sgeam! %i <> %i" a_col b_col)
+    if a_row <> b_row then failwith (sprintf "a_row <> b_row in geam! %i <> %i" a_row b_row)
+    if a_col <> b_col then failwith (sprintf "a_col <> b_col in geam! %i <> %i" a_col b_col)
 
     let lda = if transa = nT then a_row else a_col
     let ldb = if transa = nT then b_row else b_col
     let ldc = a_row
 
     let C_dArray = new CudaDeviceVariable<floatType>(a_row*a_col |> SizeT)
-    if A.dArray.Size <> B.dArray.Size then failwith "A.dArray.Length <> B.dArray.Length in sgeam"
     cublas.Geam(transa, transb, a_row, a_col, alpha, A.dArray, lda, B.dArray, ldb, beta, C_dArray, ldc)
     dMatrix.create(a_row,a_col,C_dArray)
-    
 
-/// General matrix-matrix addition.
-let sgeam2 transa transb (alpha: floatType) (A:dMatrix) beta (B:dMatrix) (C:dMatrix) =
+/// General matrix-matrix addition. Inplace version.
+let geam2 transa transb (alpha: floatType) (A:dMatrix) beta (B:dMatrix) (C:dMatrix) =
     let a_row = if transa = nT then A.num_rows else A.num_cols
     let a_col = if transa = nT then A.num_cols else A.num_rows
     let b_row = if transb = nT then B.num_rows else B.num_cols
     let b_col = if transb = nT then B.num_cols else B.num_rows
         
-    if a_row <> b_row then failwith (sprintf "a_row <> b_row in sgeam2! %i <> %i" a_row b_row)
-    if a_col <> b_col then failwith (sprintf "a_col <> b_col in sgeam2! %i <> %i" a_col b_col)
+    if a_row <> b_row then failwith (sprintf "a_row <> b_row in geam2! %i <> %i" a_row b_row)
+    if a_col <> b_col then failwith (sprintf "a_col <> b_col in geam2! %i <> %i" a_col b_col)
+
+    if a_row <> C.num_rows then failwith (sprintf "a_row <> C.num_rows in geam2! %i <> %i" a_col b_col)
+    if a_col <> C.num_cols then failwith (sprintf "a_col <> C.num_cols in geam2! %i <> %i" a_col b_col)
 
     let lda = if transa = nT then a_row else a_col
     let ldb = if transa = nT then b_row else b_col
     let ldc = a_row
 
-    if A.dArray.Size <> B.dArray.Size then failwith "A.dArray.Length <> B.dArray.Length in sgeam2"
     cublas.Geam(transa, transb, a_row, a_col, alpha, A.dArray, lda, B.dArray, ldb, beta, C.dArray, ldc)
+
+let inline transpose t = geam T T 1.0f t 0.0f t // Transpose function
+
+
+let biasTensorDesc = new TensorDescriptor()
+let dstTensorDesc = new TensorDescriptor()
+let SpiralCuDNNDataType = 
+    if typeof<floatType> = typeof<float32> then cudnnDataType.Float
+    else if typeof<floatType> = typeof<float> then cudnnDataType.Double
+    else failwith "cudnnDataType not supported."
+
+///o <- beta*mat + alpha*vec (matrix-vector broadcast addition)
+let broadcastAdd beta (mat: dMatrix) alpha (vec: dMatrix) =
+    let TensorFormat = cudnnTensorFormat.NCHW;
+    biasTensorDesc.SetTensor4dDescriptor(TensorFormat, SpiralCuDNNDataType, 1, 1, vec.num_rows, vec.num_cols)
+    dstTensorDesc.SetTensor4dDescriptor(TensorFormat, SpiralCuDNNDataType, 1, mat.num_cols, mat.num_rows, 1)
+    let copy_mat = mat.copy()
+    cudnn.AddTensor(alpha,biasTensorDesc,vec.dArray,beta,dstTensorDesc,copy_mat.dArray)
+    copy_mat
+    
+///mat <- beta*mat + alpha*vec (matrix-vector broadcast addition)
+let broadcastAdd2 beta (mat: dMatrix) alpha (vec: dMatrix) =
+    let TensorFormat = cudnnTensorFormat.NCHW;
+    biasTensorDesc.SetTensor4dDescriptor(TensorFormat, SpiralCuDNNDataType, 1, 1, vec.num_rows, vec.num_cols)
+    dstTensorDesc.SetTensor4dDescriptor(TensorFormat, SpiralCuDNNDataType, 1, mat.num_cols, mat.num_rows, 1)
+    cudnn.AddTensor(alpha,biasTensorDesc,vec.dArray,beta,dstTensorDesc,mat.dArray)
+
+/// o <- sum_across_channels(alpha*mat)
+/// For 2D matrices, channels are the columns.
+/// The function sums along the rows.
+let rowSum alpha (mat: dMatrix) =
+    let TensorFormat = cudnnTensorFormat.NHWC;
+    dstTensorDesc.SetTensor4dDescriptor(TensorFormat, SpiralCuDNNDataType, 1, mat.num_rows, 1, mat.num_cols)
+    
+    let vec = dMatrix.create(mat.num_rows,1)
+    biasTensorDesc.SetTensor4dDescriptor(TensorFormat, SpiralCuDNNDataType, 1, vec.num_rows, 1, vec.num_cols)
+    
+    cudnn.ConvolutionBackwardBias(alpha,dstTensorDesc,mat.dArray,0.0f,biasTensorDesc,vec.dArray)
+    vec
+
+/// vec <- sum_across_channels(alpha*mat)+beta*vec
+/// For 2D matrices, channels are the columns.
+/// The function sums along the rows.
+let rowSum2 alpha (mat: dMatrix) beta (vec: dMatrix) =
+    let TensorFormat = cudnnTensorFormat.NHWC;
+    dstTensorDesc.SetTensor4dDescriptor(TensorFormat, SpiralCuDNNDataType, 1, mat.num_rows, 1, mat.num_cols)
+    biasTensorDesc.SetTensor4dDescriptor(TensorFormat, SpiralCuDNNDataType, 1, mat.num_rows, 1, vec.num_cols)
+    
+    cudnn.ConvolutionBackwardBias(alpha,dstTensorDesc,mat.dArray,beta,biasTensorDesc,vec.dArray)
+    
+type dMatrix with
+    /// For accessing individual elements with the .[a,b] syntax.
+    member t.Item
+        with get(a: int, b: int) = t.dArray.[a+b*t.num_rows |> SizeT]
+        and set(a: int, b: int) (value: floatType) = t.dArray.[a+b*t.num_rows |> SizeT] <- value
+
+    /// For displaying column majors matrices inside Array2D (which is row major.)
+    member inline t.Gather'() =
+            let h_a = Array2D.zeroCreate<floatType> t.num_rows t.num_cols
+            use t' = transpose t // Transpose to row major. The use keyword ensures that it is disposed automatically as soon as it goes out of scope.
+            t'.dArray.CopyToHost(h_a) // Copy directly to host array.
+            h_a
+
 
 let divup a b = (a+b-1)/b
 
@@ -651,52 +709,7 @@ type DeviceBinaryCoefTransformModule(op: string) =
         t.A(coef_x,x.dArray,coef_y,y.dArray,o.dArray)
 
 let gradclipModule = DeviceUnaryCoefTransformModule "(x < -coef_x) ? -coef_x : (x > coef_x ? coef_x : x);"
-
-let biasTensorDesc = new TensorDescriptor()
-let dstTensorDesc = new TensorDescriptor()
-
-///o <- preactivations + bias (broadcast addition)
-let addBias (preactivations: dMatrix) (bias: dMatrix) =
-    let DataType = cudnnDataType.Float
-    let TensorFormat = cudnnTensorFormat.NCHW;
-    biasTensorDesc.SetTensor4dDescriptor(TensorFormat, DataType, 1, 1, bias.num_rows, bias.num_cols)
-    dstTensorDesc.SetTensor4dDescriptor(TensorFormat, DataType, 1, preactivations.num_cols, preactivations.num_rows, 1)
-    let alpha, beta = 1.f, 1.f
-    let copy_preact = preactivations.copy()
-    cudnn.AddTensor(alpha,biasTensorDesc,bias.dArray,beta,dstTensorDesc,copy_preact.dArray)
-    dMatrix.create(copy_preact.num_rows,copy_preact.num_cols,copy_preact.dArray)
-    
-///preactivations <- preactivations + bias (broadcast addition)
-let addBias2 beta (preactivations: dMatrix) alpha (bias: dMatrix) =
-    let DataType = cudnnDataType.Float
-    let TensorFormat = cudnnTensorFormat.NCHW;
-    biasTensorDesc.SetTensor4dDescriptor(TensorFormat, DataType, 1, 1, bias.num_rows, bias.num_cols)
-    dstTensorDesc.SetTensor4dDescriptor(TensorFormat, DataType, 1, preactivations.num_cols, preactivations.num_rows, 1)
-    cudnn.AddTensor(alpha,biasTensorDesc,bias.dArray,beta,dstTensorDesc,preactivations.dArray)
-
-/// o <- sum_across_channels(alpha*error)
-/// For 2D matrices, channels are the columns.
-let calculateBias alpha (error: dMatrix) =
-    let DataType = cudnnDataType.Float
-    let TensorFormat = cudnnTensorFormat.NHWC;
-    dstTensorDesc.SetTensor4dDescriptor(TensorFormat, DataType, 1, error.num_rows, 1, error.num_cols)
-    
-    let bias = dMatrix.create(error.num_rows,1)
-    biasTensorDesc.SetTensor4dDescriptor(TensorFormat, DataType, 1, bias.num_rows, 1, bias.num_cols)
-    
-    cudnn.ConvolutionBackwardBias(alpha/floatType error.num_cols,dstTensorDesc,error.dArray,0.0f,biasTensorDesc,bias.dArray)
-    bias
-
-/// bias <- sum_across_channels(alpha*error)
-/// For 2D matrices, channels are the columns.
-let calculateBias2 alpha (error: dMatrix) (bias: dMatrix) =
-    let DataType = cudnnDataType.Float
-    let TensorFormat = cudnnTensorFormat.NHWC;
-    dstTensorDesc.SetTensor4dDescriptor(TensorFormat, DataType, 1, error.num_rows, 1, error.num_cols)
-    biasTensorDesc.SetTensor4dDescriptor(TensorFormat, DataType, 1, bias.num_rows, 1, bias.num_cols)
-    
-    cudnn.ConvolutionBackwardBias(alpha/floatType bias.num_cols,dstTensorDesc,error.dArray,0.0f,biasTensorDesc,bias.dArray)
-    
+   
 // coef_x = scale
 // coef_y = location
 // y does not get used.
@@ -743,13 +756,13 @@ type DM_rec = {
         {P=ref P;A=ref <| P.zeroLike();is_constant=false}
         
     static member createConstant (P: dMatrix) =
-        {P=ref P;A=ref empty;is_constant=true}
+        {P=ref P;A=ref (dMatrix.createEmpty);is_constant=true}
 
-    static member createEmpty () =
-        {P=ref empty;A=ref empty;is_constant=false}
+    static member createEmpty =
+        {P=ref (dMatrix.createEmpty);A=ref (dMatrix.createEmpty);is_constant=false}
         
-    static member createEmptyConstant () =
-        {P=ref empty;A=ref empty;is_constant=true}
+    static member createEmptyConstant =
+        {P=ref (dMatrix.createEmpty);A=ref (dMatrix.createEmpty);is_constant=true}
 
     /// Resizes the primal and the adjoint if they are below nr*nc in size.
     member t.Resize nr nc =
@@ -761,12 +774,8 @@ type DM_rec = {
 
         // If the class is larger, replace the reference else the function will mutably just adjust
         // the num_rows and num_col fields.
-        match (!p).ReplaceIf nr nc with
-        | Some x -> p := x
-        | None -> ()
-        match (!a).ReplaceIf nr nc with
-        | Some x -> a := x
-        | None -> ()
+        (!p).ReplaceIf nr nc
+        (!a).ReplaceIf nr nc
         
 
 type Rf =
@@ -863,7 +872,7 @@ let hadmult (a: RDM) (b: RDM) =
     let el = a.r.A
     let er = b.r.A
 
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
 
@@ -884,7 +893,7 @@ let hadmult (a: RDM) (b: RDM) =
 /// Can be used for both matrix-matrix standards and Hadamarad multiplications, but it is not intended that they be used at the same time.
 /// It might be good to split this function for that reason.
 let linear_layer (mm: (RDM*RDM) []) (hads: (RDM*RDM) []) (bias: RDM option) =
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
 
@@ -901,21 +910,21 @@ let linear_layer (mm: (RDM*RDM) []) (hads: (RDM*RDM) []) (bias: RDM option) =
         else failwith "Invalid input into linear_layer."
 
         match bias with
-        | Some bias -> addBias2 0.0f !c 1.0f !bias.r.P
+        | Some bias -> broadcastAdd2 0.0f !c 1.0f !bias.r.P
         | None -> (!c).setZero()
                 
-        for l,r in mm do sgemm2 nT nT 1.0f !l.r.P !r.r.P 1.0f !c
+        for l,r in mm do gemm2 nT nT 1.0f !l.r.P !r.r.P 1.0f !c
         for l,r in hads do hadamaradMultiplicationErrorModule.A(!l.r.P, !r.r.P, !c, !c)
 
     let fb() =
         for l,r in mm do
-            if l.r.is_constant = false then sgemm2 nT T 1.0f !error !r.r.P 1.0f !l.r.A
-            if r.r.is_constant = false then sgemm2 T nT 1.0f !l.r.P !error 1.0f !r.r.A
+            if l.r.is_constant = false then gemm2 nT T 1.0f !error !r.r.P 1.0f !l.r.A
+            if r.r.is_constant = false then gemm2 T nT 1.0f !l.r.P !error 1.0f !r.r.A
         for l,r in hads do 
             hadamaradMultiplicationErrorModule.A(!error, !r.r.P, !l.r.A, !l.r.A)
             hadamaradMultiplicationErrorModule.A(!l.r.P, !error, !r.r.A, !r.r.A)
         match bias with
-        | Some bias -> calculateBias2 1.0f !error !bias.r.A
+        | Some bias -> rowSum2 1.0f !error !bias.r.A
         | None -> ()
     let ar =
         [|
@@ -934,7 +943,7 @@ let matmult (a: RDM) (b:RDM) =
     let el = a.r.A
     let er = b.r.A
 
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
         
@@ -942,10 +951,10 @@ let matmult (a: RDM) (b:RDM) =
         let nr = (!va).num_rows
         let nc = (!vb).num_cols
         node.Resize nr nc
-        sgemm2 nT nT 1.0f !va !vb 0.0f !c
+        gemm2 nT nT 1.0f !va !vb 0.0f !c
     let fb () = 
-        if a.r.is_constant = false then sgemm2 nT T 1.0f !error !vb 1.0f !el// The derivative with respect to the left. So the above argument gets inserted from the right left. Usually error * input.
-        if b.r.is_constant = false then sgemm2 T nT 1.0f !va !error 1.0f !er// The derivative with respect to the right. So the above argument gets inserted from the right side. Usually weights * error.
+        if a.r.is_constant = false then gemm2 nT T 1.0f !error !vb 1.0f !el// The derivative with respect to the left. So the above argument gets inserted from the right left. Usually error * input.
+        if b.r.is_constant = false then gemm2 T nT 1.0f !va !error 1.0f !er// The derivative with respect to the right. So the above argument gets inserted from the right side. Usually weights * error.
     let t = DMR(node,ff,fb,[|a;b|])
     tape.Add(RDM t)
     t
@@ -957,18 +966,18 @@ let addb (a: RDM) (b: RDM) = // b is for bias and a is for preactivations.
     let el = a.r.A
     let er = b.r.A
 
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
 
     let ff () = 
         let nr,nc = (!va).rc
         node.Resize nr nc
-        sgeam2 nT nT 1.0f !va 0.0f !c !c
-        addBias2 1.0f !c 1.0f !vb
+        geam2 nT nT 1.0f !va 0.0f !c !c
+        broadcastAdd2 1.0f !c 1.0f !vb
     let fb () = 
-        sgeam2 nT nT 1.0f !el 1.0f !error !el
-        calculateBias2 1.0f !error !er
+        geam2 nT nT 1.0f !el 1.0f !error !el
+        rowSum2 1.0f !error !er
     let t = DMR(node,ff,fb,[|a;b|])
     tape.Add(RDM t)
     t
@@ -981,7 +990,7 @@ let sigmoid (a:RDM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
 
@@ -1002,7 +1011,7 @@ let tanh_ (a:RDM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
 
@@ -1021,18 +1030,18 @@ let add alpha (a: RDM) beta (b: RDM) =
     let el = a.r.A
     let er = b.r.A
 
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
 
     let ff () = 
         let nr,nc = (!va).rc
         node.Resize nr nc
-        sgeam2 nT nT alpha !va beta !vb !c
+        geam2 nT nT alpha !va beta !vb !c
     let fb () = 
         let nr,nc = (!va).rc
-        if (a.r.is_constant) = false then sgeam2 nT nT alpha !error 1.0f !el !el
-        if (b.r.is_constant) = false then sgeam2 nT nT 1.0f !er beta !error !er
+        if (a.r.is_constant) = false then geam2 nT nT alpha !error 1.0f !el !el
+        if (b.r.is_constant) = false then geam2 nT nT 1.0f !er beta !error !er
     let t = DMR(node,ff,fb,[|a;b|])
     tape.Add(RDM t)
     t
@@ -1057,7 +1066,7 @@ let square (a:RDM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
 
@@ -1116,7 +1125,7 @@ let log_ (a:RDM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
 
@@ -1136,7 +1145,7 @@ let scalar_matrix_add scalar coef (a:RDM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
 
@@ -1144,7 +1153,7 @@ let scalar_matrix_add scalar coef (a:RDM) =
         let nr,nc = (!va).rc
         node.Resize nr nc
         scalarMatrixAddModule.A(scalar,!va,coef,!va,!c)
-    let fb () = sgeam2 nT nT coef !error 1.0f !el !el
+    let fb () = geam2 nT nT coef !error 1.0f !el !el
     let t = DMR(node,ff,fb,[|a|])
     tape.Add(RDM t)
     t
@@ -1155,7 +1164,7 @@ let scalar_add (a:RDM) b =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
 
@@ -1163,7 +1172,7 @@ let scalar_add (a:RDM) b =
         let nr,nc = (!va).rc
         node.Resize nr nc
         scalarAddModule.A(b,!va,!c)
-    let fb () = sgeam2 nT nT 1.0f !error 1.0f !el !el
+    let fb () = geam2 nT nT 1.0f !error 1.0f !el !el
     let t = DMR(node,ff,fb,[|a|])
     tape.Add(RDM t)
     t
@@ -1172,15 +1181,15 @@ let neg (a:RDM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty()
+    let node = DM_rec.createEmpty
     let c = node.P
     let error = node.A
 
     let ff () = 
         let nr,nc = (!va).rc
         node.Resize nr nc
-        sgeam2 nT nT -1.0f !va 0.0f !va !c
-    let fb () = sgeam2 nT nT -1.0f !error 1.0f !el !el
+        geam2 nT nT -1.0f !va 0.0f !va !c
+    let fb () = geam2 nT nT -1.0f !error 1.0f !el !el
     let t = DMR(node,ff,fb,[|a|])
     tape.Add(RDM t)
     t
@@ -1303,7 +1312,7 @@ let resetTapePrimal (tape: Generic.List<R>) = for x in tape do x.resetPrimal()
 let add_gradients_to_weights (base_nodes: RDM[]) learning_rate clip_coef = 
     for x in base_nodes do 
         gradclipModule.A(clip_coef,!x.r.A,!x.r.A)
-        sgeam2 nT nT 1.0f !x.r.P -learning_rate !x.r.A !x.r.P
+        geam2 nT nT 1.0f !x.r.P -learning_rate !x.r.A !x.r.P
 
 let nesterov_add_gradients (base_nodes: RDM[]) (momentum_matrices: dMatrix[]) (copy_weights: dMatrix[]) learning_rate momentum_rate clip_coef = 
     for i=0 to base_nodes.Length-1 do
@@ -1311,9 +1320,9 @@ let nesterov_add_gradients (base_nodes: RDM[]) (momentum_matrices: dMatrix[]) (c
         let m = momentum_matrices.[i]
         let c = copy_weights.[i]
         gradclipModule.A(clip_coef,!x.r.A,!x.r.A)
-        sgeam2 nT nT -learning_rate !x.r.A momentum_rate m m // Add the gradients to the momentum matrices
-        sgeam2 nT nT 1.0f m 1.0f c c // Add momentum to the copy matrix
-        sgeam2 nT nT 1.0f c momentum_rate m !x.r.P // Apply Nesterov's momentum to the weights. It is really the copy weights that serve as the basis.
+        geam2 nT nT -learning_rate !x.r.A momentum_rate m m // Add the gradients to the momentum matrices
+        geam2 nT nT 1.0f m 1.0f c c // Add momentum to the copy matrix
+        geam2 nT nT 1.0f c momentum_rate m !x.r.P // Apply Nesterov's momentum to the weights. It is really the copy weights that serve as the basis.
 
 let save_data filename (ar: RDM []) =
     let stream_data = File.OpenWrite(filename)
@@ -1627,11 +1636,6 @@ type DeviceSetSliceModule() =
 let getsliceModule = DeviceGetSliceModule()
 
 type dMatrix with
-    member t.Item
-        with get(a: int, b: int) = t.dArray.[b+a*t.num_cols |> SizeT]
-        and set(a: int, b: int) (value: floatType) = t.dArray.[b+a*t.num_cols |> SizeT] <- value
-    member t.setItem(a: int, b: int) (value: floatType) = t.dArray.[b+a*t.num_cols |> SizeT] <- value
-
     member t.GetSlice(rowStart: int option, rowFinish : int option,
                          colStart: int option, colFinish : int option) =
         let rowStart = defaultArg rowStart 0
@@ -1649,13 +1653,6 @@ type dMatrix with
             let rowStart = defaultArg rowStart 0
             let rowFinish = defaultArg rowFinish t.num_rows-1
             getsliceModule.AR(t,rowStart,rowFinish,col,col)
-
-    /// For displaying column majors matrices inside Array2D (which is row major.)
-    member inline t.Gather'() =
-            let h_a = Array2D.zeroCreate<floatType> t.num_rows t.num_cols
-            use t' = sgeam T T 1.0f t 0.0f t // Transpose
-            t'.dArray.CopyToHost(h_a)
-            h_a
 
 
 

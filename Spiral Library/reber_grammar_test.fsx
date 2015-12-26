@@ -106,7 +106,7 @@ let s = [|
         yield lstm_embedded_reber_train 100 5.0f d_training_data_20 d_target_data_20 d_training_data_validation d_target_data_validation 1.0f l1 l2 tape_t tape_v
         |] |> Array.concat
 #time
-// Get 3-4s depending on how hot the GPU is.
+// On the GTX 970, I get 3-4s depending on how hot the GPU is.
 let l = [|for l,_ in s do yield l|]
 let r = [|for _,r in s do yield r|]
 

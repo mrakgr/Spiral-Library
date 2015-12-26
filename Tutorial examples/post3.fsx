@@ -60,3 +60,7 @@ type CudaDeviceVariable<'t when 't: struct and 't: (new: unit -> 't) and 't:> Sy
 let inline new_dev<'t when 't: struct and 't: (new: unit -> 't) and 't:> System.ValueType> (n: int) =
     new CudaDeviceVariable<'t>(SizeT n)
 
+let a = [|1.0f;2.0f;3.0f|]
+let a' = to_dev a
+a'.[SizeT 0] <- 5.0f // Annoyingly, it is necessary to add explicitly convert ints to SizeT when accessing individual items in the CudaDeviceVariable class.
+let b = to_host a'

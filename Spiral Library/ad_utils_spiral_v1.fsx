@@ -273,7 +273,7 @@ type dMatrix with
             h_a
 
 
-let divup a b = (a+b-1)/b
+let inline divup a b = (a+b-1)/b // Division with rounding up.
 
 /// o <- f(x)
 type DeviceUnaryTransformModule(op: string) = 
@@ -282,13 +282,13 @@ type DeviceUnaryTransformModule(op: string) =
     let kernel_code = "
         //Kernel code:
         extern \"C\" {
-            __device__ inline float op(float x)
+            __device__ inline "+FloatTypeCpp+" op("+FloatTypeCpp+" x)
             {
                 return "+op+"
             }
         
             // Device code
-            __global__ void Map1Kernel(const float* A, float* O, const int N)
+            __global__ void Map1Kernel(const "+FloatTypeCpp+"* A, "+FloatTypeCpp+"* O, const int N)
             {
                 int i = blockDim.x * blockIdx.x + threadIdx.x;
                 const int stride = blockDim.x * gridDim.x;
@@ -314,7 +314,7 @@ type DeviceUnaryTransformModule(op: string) =
     member t.A(x: CudaDeviceVariable<floatType>) =
         let n = int x.Size
         let o = new_dev<floatType> n
-        let gridSize = min (divup n block_size) 16*numSm
+        let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
         kernel.RunAsync(str.Stream, x.DevicePointer,o.DevicePointer,n) |> ignore
@@ -322,7 +322,7 @@ type DeviceUnaryTransformModule(op: string) =
 
     member t.A(x: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>) =
         let n = int o.Size
-        let gridSize = min (divup n block_size) 16*numSm
+        let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
         kernel.RunAsync(str.Stream, x.DevicePointer,o.DevicePointer,n) |> ignore
@@ -333,6 +333,7 @@ type DeviceUnaryTransformModule(op: string) =
         o
 
     member t.A(x: dMatrix, o: dMatrix) =
+        if x.rc <> o.rc then failwith "x.rc <> o.rc in DeviceUnaryTransformModule"
         t.A(x.dArray,o.dArray)
 
 /// o <- f(x,y)
@@ -342,13 +343,13 @@ type DeviceBinaryTransformModule(op: string) =
     let kernel_code = "
         //Kernel code:
         extern \"C\" {
-            __device__ inline float op(float x, float y)
+            __device__ inline "+FloatTypeCpp+" op("+FloatTypeCpp+" x, "+FloatTypeCpp+" y)
             {
                 return "+op+"
             }
         
             // Device code
-            __global__ void Map2Kernel(const float* A, const float* B, float* O, const int N)
+            __global__ void Map2Kernel(const "+FloatTypeCpp+"* A, const "+FloatTypeCpp+"* B, "+FloatTypeCpp+"* O, const int N)
             {
                 int i = blockDim.x * blockIdx.x + threadIdx.x;
                 const int stride = blockDim.x * gridDim.x;
@@ -374,7 +375,7 @@ type DeviceBinaryTransformModule(op: string) =
     member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>) =
         let n = int x.Size
         let o = new_dev<floatType> n
-        let gridSize = min (divup n block_size) 16*numSm
+        let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
         kernel.RunAsync(str.Stream, x.DevicePointer,y.DevicePointer,o.DevicePointer,n) |> ignore
@@ -382,7 +383,7 @@ type DeviceBinaryTransformModule(op: string) =
 
     member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>) =
         let n = int o.Size
-        let gridSize = min (divup n block_size) 16*numSm
+        let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
         kernel.RunAsync(str.Stream, x.DevicePointer,y.DevicePointer,o.DevicePointer,n) |> ignore
@@ -394,6 +395,7 @@ type DeviceBinaryTransformModule(op: string) =
 
     member t.A(x: dMatrix, y: dMatrix, o: dMatrix) =
         if x.rc <> y.rc then failwith "x.rc <> y.rc in DeviceBinaryTransformModule"
+        if y.rc <> o.rc then failwith "y.rc <> o.rc in DeviceBinaryTransformModule"
         t.A(x.dArray,y.dArray,o.dArray)
 
 /// o <- f(x,y,z)
@@ -403,13 +405,13 @@ type DeviceTrinaryTransformModule(op: string) =
     let kernel_code = "
         //Kernel code:
         extern \"C\" {
-            __device__ inline float op(float x, float y, float z)
+            __device__ inline "+FloatTypeCpp+" op("+FloatTypeCpp+" x, "+FloatTypeCpp+" y, "+FloatTypeCpp+" z)
             {
                 return "+op+"
             }
         
             // Device code
-            __global__ void Map3Kernel(const float* A, const float* B, const float* C, float* O, const int N)
+            __global__ void Map3Kernel(const "+FloatTypeCpp+"* A, const "+FloatTypeCpp+"* B, const "+FloatTypeCpp+"* C, "+FloatTypeCpp+"* O, const int N)
             {
                 int i = blockDim.x * blockIdx.x + threadIdx.x;
                 const int stride = blockDim.x * gridDim.x;
@@ -435,7 +437,7 @@ type DeviceTrinaryTransformModule(op: string) =
     member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>, z: CudaDeviceVariable<floatType>) =
         let n = int x.Size
         let o = new_dev<floatType> n
-        let gridSize = min (divup n block_size) 16*numSm
+        let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
         kernel.RunAsync(str.Stream, x.DevicePointer,y.DevicePointer,z.DevicePointer,o.DevicePointer,n) |> ignore
@@ -443,7 +445,7 @@ type DeviceTrinaryTransformModule(op: string) =
 
     member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>, z: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>) =
         let n = int o.Size
-        let gridSize = min (divup n block_size) 16*numSm
+        let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
         kernel.RunAsync(str.Stream, x.DevicePointer,y.DevicePointer,z.DevicePointer,o.DevicePointer,n) |> ignore
@@ -456,6 +458,7 @@ type DeviceTrinaryTransformModule(op: string) =
     member t.A(x: dMatrix, y: dMatrix, z: dMatrix, o: dMatrix) =
         if x.rc <> y.rc then failwith "x.rc <> y.rc in DeviceTrinaryTransformModule"
         if y.rc <> z.rc then failwith "y.rc <> z.rc in DeviceTrinaryTransformModule"
+        if z.rc <> o.rc then failwith "y.rc <> o.rc in DeviceTrinaryTransformModule"
         t.A(x.dArray,y.dArray,z.dArray,o.dArray)
 
 /// o <- sum(f(x))
@@ -465,32 +468,29 @@ type DeviceUnaryMapSumModule(op: string) =
     let kernel_code = "
         //Kernel code:
         extern \"C\" {
-            __device__ inline float op(float x)
+            __device__ inline "+FloatTypeCpp+" op("+FloatTypeCpp+" x)
             {
                 return "+op+"
             }
         
-            __device__ inline float warpDownReduce(float value){
+            __device__ inline "+FloatTypeCpp+" warpDownReduce("+FloatTypeCpp+" value){
 	            for (int i = 16; i>0; i = i / 2) value += __shfl_down(value, i);
 	            return value;
             }
 
             // Device code
-            __global__ void MapSumKernel(const float* A, float* O, const int N)
+            __global__ void MapSumKernel(const "+FloatTypeCpp+"* A, "+FloatTypeCpp+"* O, const int N)
             {
 	            int i = blockDim.x * blockIdx.x + threadIdx.x;
 	            const int stride = blockDim.x * gridDim.x;
-	            __shared__ float temp[32];
-                if (threadIdx.x < 32) temp[threadIdx.x] = 0.0f;
-	
-	            float acc = 0.0f;
+	            __shared__ "+FloatTypeCpp+" temp[32];
+                if (threadIdx.x < 32) temp[threadIdx.x] = 0.0f; "+FloatTypeCpp+" acc = 0.0f;
 	            while (i < N)
 	            {
 		            acc += op(A[i]);
 		            i += stride;
 	            }
-	            __syncthreads();
-	            float out_partial = warpDownReduce(acc);
+	            __syncthreads(); "+FloatTypeCpp+" out_partial = warpDownReduce(acc);
 	            if (threadIdx.x % 32 == 0) temp[threadIdx.x / 32] = out_partial;
 	            __syncthreads();
 	            if (threadIdx.x < 32) out_partial = warpDownReduce(temp[threadIdx.x]);
@@ -529,32 +529,29 @@ type DeviceBinaryMapSumModule(op: string) =
     let kernel_code = "
         //Kernel code:
         extern \"C\" {
-            __device__ inline float op(float x, float y)
+            __device__ inline "+FloatTypeCpp+" op("+FloatTypeCpp+" x, "+FloatTypeCpp+" y)
             {
                 return "+op+"
             }
         
-            __device__ inline float warpDownReduce(float value){
+            __device__ inline "+FloatTypeCpp+" warpDownReduce("+FloatTypeCpp+" value){
 	            for (int i = 16; i>0; i = i / 2) value += __shfl_down(value, i);
 	            return value;
             }
 
             // Device code
-            __global__ void Map2SumKernel(const float* A, const float* B, float* O, const int N)
+            __global__ void Map2SumKernel(const "+FloatTypeCpp+"* A, const "+FloatTypeCpp+"* B, "+FloatTypeCpp+"* O, const int N)
             {
 	            int i = blockDim.x * blockIdx.x + threadIdx.x;
 	            const int stride = blockDim.x * gridDim.x;
-	            __shared__ float temp[32];
-                if (threadIdx.x < 32) temp[threadIdx.x] = 0.0f;
-	
-	            float acc = 0.0f;
+	            __shared__ "+FloatTypeCpp+" temp[32]; 
+                if (threadIdx.x < 32) temp[threadIdx.x] = 0.0f; "+FloatTypeCpp+" acc = 0.0f;
 	            while (i < N)
 	            {
 		            acc += op(A[i],B[i]);
 		            i += stride;
 	            }
-	            __syncthreads();
-	            float out_partial = warpDownReduce(acc);
+	            __syncthreads(); "+FloatTypeCpp+" out_partial = warpDownReduce(acc);
 	            if (threadIdx.x % 32 == 0) temp[threadIdx.x / 32] = out_partial;
 	            __syncthreads();
 	            if (threadIdx.x < 32) out_partial = warpDownReduce(temp[threadIdx.x]);
@@ -594,13 +591,13 @@ type DeviceUnaryCoefTransformModule(op: string) =
     let kernel_code = "
         //Kernel code:
         extern \"C\" {
-            __device__ inline float op(float coef_x, float x)
+            __device__ inline "+FloatTypeCpp+" op("+FloatTypeCpp+" coef_x, "+FloatTypeCpp+" x)
             {
                 return "+op+"
             }
         
             // Device code
-            __global__ void MapCoefKernel(const float coef_A, const float* A, float* O, const int N)
+            __global__ void MapCoefKernel(const "+FloatTypeCpp+" coef_A, const "+FloatTypeCpp+"* A, "+FloatTypeCpp+"* O, const int N)
             {
                 int i = blockDim.x * blockIdx.x + threadIdx.x;
                 const int stride = blockDim.x * gridDim.x;
@@ -626,7 +623,7 @@ type DeviceUnaryCoefTransformModule(op: string) =
     member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>) =
         let n = int x.Size
         let o = new_dev<floatType> n
-        let gridSize = min (divup n block_size) 16*numSm
+        let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
         kernel.RunAsync(str.Stream, coef_x,x.DevicePointer,o.DevicePointer,n) |> ignore
@@ -634,7 +631,7 @@ type DeviceUnaryCoefTransformModule(op: string) =
 
     member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>) =
         let n = int o.Size
-        let gridSize = min (divup n block_size) 16*numSm
+        let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
         kernel.RunAsync(str.Stream, coef_x,x.DevicePointer,o.DevicePointer,n) |> ignore
@@ -645,6 +642,7 @@ type DeviceUnaryCoefTransformModule(op: string) =
         o
 
     member t.A(coef_x, x: dMatrix, o: dMatrix) =
+        if x.rc <> o.rc then failwith "x.rc <> o.rc in DeviceUnaryCoefTransformModule"
         t.A(coef_x,x.dArray,o.dArray)
 
 /// o <- f(coef_x,x,coef_y,y)
@@ -654,13 +652,13 @@ type DeviceBinaryCoefTransformModule(op: string) =
     let kernel_code = "
         //Kernel code:
         extern \"C\" {
-            __device__ inline float op(float coef_x, float x, float coef_y, float y)
+            __device__ inline "+FloatTypeCpp+" op("+FloatTypeCpp+" coef_x, "+FloatTypeCpp+" x, "+FloatTypeCpp+" coef_y, "+FloatTypeCpp+" y)
             {
                 return "+op+"
             }
         
             // Device code
-            __global__ void MapCoef2Kernel(const float coef_A, const float* A, const float coef_B, const float* B, float* O, const int N)
+            __global__ void MapCoef2Kernel(const "+FloatTypeCpp+" coef_A, const "+FloatTypeCpp+"* A, const "+FloatTypeCpp+" coef_B, const "+FloatTypeCpp+"* B, "+FloatTypeCpp+"* O, const int N)
             {
                 int i = blockDim.x * blockIdx.x + threadIdx.x;
                 const int stride = blockDim.x * gridDim.x;
@@ -686,7 +684,7 @@ type DeviceBinaryCoefTransformModule(op: string) =
     member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>,coef_y: floatType, y: CudaDeviceVariable<floatType>) =
         let n = int x.Size
         let o = new_dev<floatType> n
-        let gridSize = min (divup n block_size) 16*numSm
+        let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
         kernel.RunAsync(str.Stream, coef_x,x.DevicePointer,coef_y, y.DevicePointer,o.DevicePointer,n) |> ignore
@@ -694,7 +692,7 @@ type DeviceBinaryCoefTransformModule(op: string) =
 
     member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>, coef_y: floatType, y: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>) =
         let n = int o.Size
-        let gridSize = min (divup n block_size) 16*numSm
+        let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
         kernel.RunAsync(str.Stream, coef_x,x.DevicePointer,coef_y,y.DevicePointer,o.DevicePointer,n) |> ignore
@@ -705,9 +703,11 @@ type DeviceBinaryCoefTransformModule(op: string) =
         o
 
     member t.A(coef_x, x: dMatrix, coef_y, y: dMatrix, o: dMatrix) =
-        if x.rc <> y.rc then failwith "y.rc <> y.rc in DeviceBinaryCoefTransformModule"
+        if x.rc <> y.rc then failwith "x.rc <> y.rc in DeviceBinaryCoefTransformModule"
+        if y.rc <> o.rc then failwith "y.rc <> o.rc in DeviceBinaryCoefTransformModule"
         t.A(coef_x,x.dArray,coef_y,y.dArray,o.dArray)
 
+// The gradient clipping module.
 let gradclipModule = DeviceUnaryCoefTransformModule "(x < -coef_x) ? -coef_x : (x > coef_x ? coef_x : x);"
    
 // coef_x = scale
@@ -716,6 +716,7 @@ let gradclipModule = DeviceUnaryCoefTransformModule "(x < -coef_x) ? -coef_x : (
 let randMapModule = DeviceBinaryCoefTransformModule "coef_x*(x-0.5f)+coef_y;"
 
 type dMatrix with
+    /// Generates a matrix sampled from a random uniform distribution in <-1.0f,1.0f]
     static member createRandomUniformMatrix weights_num_rows weights_num_cols (scaling_factor : floatType) location =
         let weights_total_size = weights_num_rows*weights_num_cols
         
@@ -728,6 +729,7 @@ type dMatrix with
 
         dMatrix.create(weights_num_rows,weights_num_cols,cudaBuffer)
 
+    /// Fills matrix by sampling from a random uniform distribution in <-1.0f,1.0f]
     member t.fillRandomUniformMatrix (scaling_factor : floatType) location =
         let weights_total_size = t.num_rows*t.num_cols
 
@@ -923,8 +925,9 @@ let linear_layer (mm: (RDM*RDM) []) (hads: (RDM*RDM) []) (bias: RDM option) =
         for l,r in hads do 
             hadamaradMultiplicationErrorModule.A(!error, !r.r.P, !l.r.A, !l.r.A)
             hadamaradMultiplicationErrorModule.A(!l.r.P, !error, !r.r.A, !r.r.A)
+        
         match bias with
-        | Some bias -> rowSum2 1.0f !error !bias.r.A
+        | Some bias -> rowSum2 1.0f !error 1.0f !bias.r.A
         | None -> ()
     let ar =
         [|
@@ -977,7 +980,7 @@ let addb (a: RDM) (b: RDM) = // b is for bias and a is for preactivations.
         broadcastAdd2 1.0f !c 1.0f !vb
     let fb () = 
         geam2 nT nT 1.0f !el 1.0f !error !el
-        rowSum2 1.0f !error !er
+        rowSum2 1.0f !error 1.0f !er
     let t = DMR(node,ff,fb,[|a;b|])
     tape.Add(RDM t)
     t

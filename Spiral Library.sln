@@ -12,7 +12,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution 
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tutorial Examples", "Tutorial Examples", "{2E1EFD51-A072-4E31-8C4B-7AFBD99D6B73}"
 	ProjectSection(SolutionItems) = preProject
+		Tutorial examples\post3.fsx = Tutorial examples\post3.fsx
 		Tutorial examples\post4.fsx = Tutorial examples\post4.fsx
+		Tutorial examples\post5.fsx = Tutorial examples\post5.fsx
+		post6.fsx = post6.fsx
 	EndProjectSection
 EndProject
 Global

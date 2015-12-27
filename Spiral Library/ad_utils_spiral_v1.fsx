@@ -458,7 +458,7 @@ type DeviceTrinaryTransformModule(op: string) =
     member t.A(x: dMatrix, y: dMatrix, z: dMatrix, o: dMatrix) =
         if x.rc <> y.rc then failwith "x.rc <> y.rc in DeviceTrinaryTransformModule"
         if y.rc <> z.rc then failwith "y.rc <> z.rc in DeviceTrinaryTransformModule"
-        if z.rc <> o.rc then failwith "y.rc <> o.rc in DeviceTrinaryTransformModule"
+        if z.rc <> o.rc then failwith "z.rc <> o.rc in DeviceTrinaryTransformModule"
         t.A(x.dArray,y.dArray,z.dArray,o.dArray)
 
 /// o <- sum(f(x))
@@ -722,7 +722,6 @@ type dMatrix with
         
         let cudaBuffer = new_dev<floatType> weights_total_size
         cudaRandom.GenerateUniform(cudaBuffer)
-        //str.Synchronize()
 
         // 2.0f*scaling_factor ensures that it is rescaled around zero if the scaling_factor is 1.0f.
         randMapModule.A(2.0f*scaling_factor,cudaBuffer,location,cudaBuffer,cudaBuffer)

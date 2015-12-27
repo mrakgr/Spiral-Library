@@ -186,10 +186,12 @@ module ReverseADExample =
         struct // Struct is similar to record or a class except it is stack allocated.
         val P : float32 // primal
         val A : float32 ref // adjoint (reference type)
-        new p = {P=p;A=ref 0.0f}
+        new (p) = {P=p;A=ref 0.0f}
+        new (p,t) = {P=p;A=ref t}
         end with
 
         override t.ToString() = sprintf "(%f,%f)" t.P !t.A // To make F# Interactive print out the fields
+        member t.dup = Df(t.P,!t.A) // Makes a duplicate of the struct.
 
     open System.Collections.Generic
     let tape = List<unit -> unit>() // List is not really a list, but a dynamic array. unit -> unit is the function type that takes no parameters and returns nothing.
@@ -251,12 +253,12 @@ module ReverseADExample =
 
     // These are the original assignments. In AD literature the starting variables are denoted from i up to 0, but here they will start at 0.
     // Starting from scratch, this would be the evaluation trace of the program had I decompiled it.
-    let v0 = target
-    let v1 = input
-    let v2 = W
-    let v3 = W2
-    let v4 = bias
-    let v5 = bias2
+    let v0 = target.dup // The reason for these duplicates is to emphasize that the F# Interactive will output only the values of the final run.
+    let v1 = input.dup  // In this case it makes no difference as they will be the same either way, but it would improper to not copy them.
+    let v2 = W.dup
+    let v3 = W2.dup
+    let v4 = bias.dup
+    let v5 = bias2.dup
     // The first calculation is W*input = v2*v1.
     let v6 = v2*v1
     // Then comes v6+bias=v6+v4
@@ -278,13 +280,12 @@ module ReverseADExample =
 
     for i=tape.Count-1 downto 0 do tape.[i]() // Let the computer crank it for you from top to bottom.
 
-    let adjoint_W = !W.A
-    let adjoint_W2 = !W2.A
-    let adjoint_bias = !bias.A
-    let adjoint_bias2 = !bias2.A
+    let adjoint_W = !v2.A
+    let adjoint_W2 = !v3.A
+    let adjoint_bias = !v4.A
+    let adjoint_bias2 = !v5.A
 
     // Once more from the top.
-    let l = [|v5;v4;v3;v2;v1;v0|] |> Array.iter (fun x -> x.A := 0.0f) // Reset the adjoints of the base variables.
     tape.Clear()
     let y = (target-sigmoid(W2 * tanh(W*input+bias) + bias2))**2.0f
     y.A := 1.0f

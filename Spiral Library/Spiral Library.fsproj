@@ -59,6 +59,8 @@
     <None Include="embedded_reber.fsx" />
     <None Include="reber_grammar_test.fsx" />
     <None Include="spiral_old.fsx" />
+    <None Include="load_mnist.fsx" />
+    <None Include="embedded_gramar_branch.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="CudaBlas">

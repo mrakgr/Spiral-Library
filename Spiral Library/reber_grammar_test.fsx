@@ -27,7 +27,7 @@ let make_data_from_set target_length =
                     let example = twenties.[k]
                     let s, input, output = example
                     yield input.[i] |] |> Array.concat
-            yield RDM.makeConstantNode(7,batch_size,input)|]
+            yield DM.makeConstantNode(7,batch_size,input)|]
 
     let d_target_data =
         [|
@@ -37,20 +37,20 @@ let make_data_from_set target_length =
                     let example = twenties.[k]
                     let s, input, output = example
                     yield output.[i] |] |> Array.concat
-            yield RDM.makeConstantNode(7,batch_size,output)|]
+            yield DM.makeConstantNode(7,batch_size,output)|]
 
     d_training_data, d_target_data
 
 
-let lstm_embedded_reber_train num_iters learning_rate (data: RDM[]) (targets: RDM[]) (data_v: RDM[]) (targets_v: RDM[]) clip_coef (l1: LSTMLayer) (l2: Layer) (tape_t: tapeType) (tape_v: tapeType) =
+let lstm_embedded_reber_train num_iters learning_rate (data: DM[]) (targets: DM[]) (data_v: DM[]) (targets_v: DM[]) clip_coef (l1: LSTMLayer) (l2: Layer) =
     [|
     let l1 = l1
     let l2 = l2
+    
     let base_nodes = [|l1.ToArray;l2.ToArray|] |> Array.concat
-    for x in base_nodes do (!x.r.A).setZero()
 
-    let training_loop (data: RDM[]) (targets: RDM[]) (tape_local: tapeType) =
-        tape <- tape_local
+    let training_loop (data: DM[]) (targets: DM[]) i =
+        tape.Select i
         let costs = [|
             let mutable a, c = l1.runLayerNoH data.[0]
             let b = l2.runLayerNoH a
@@ -64,46 +64,51 @@ let lstm_embedded_reber_train num_iters learning_rate (data: RDM[]) (targets: RD
                 let r = squared_error_cost targets.[i] b
                 yield r
             |]
-        scale (1.0f/float32 costs.Length) (sum_scalars costs)
+        scale (1.0f/float32 (costs.Length-1)) (sum_scalars costs)
 
-    tape_t.Clear()
-    tape_v.Clear()
+    let ts = (data.Length-1)
+    let vs = (data_v.Length-1)
 
-    let r = training_loop data targets tape_t
-    let rv = training_loop data_v targets_v tape_v
-    
+    let r = training_loop data targets ts
+    let rv = training_loop data_v targets_v vs
+
     let mutable r' = 0.0f
     let mutable i = 1
     while i <= num_iters && System.Single.IsNaN r' = false do
-        forwardpropTape tape_t
+        tape.forwardpropTape ts
         printfn "The training cost is %f at iteration %i" !r.r.P i
-        forwardpropTape tape_v
+        tape.forwardpropTape vs
         printfn "The validation cost is %f at iteration %i" !rv.r.P i
         yield !r.r.P, !rv.r.P
 
-        for x in base_nodes do (!x.r.A).setZero()
-        resetTapeAdjoint tape_t
+        tape.resetTapeAdjoint -1 // Resets base adjoints
+        tape.resetTapeAdjoint ts // Resets the adjoints for the training select
         r.r.A := 1.0f
-        reversepropTape tape_t
+        tape.reversepropTape ts // Resets the adjoints for the test select
         add_gradients_to_weights base_nodes learning_rate clip_coef
 
+        //tape.Dispose ts
+        //tape.Dispose vs
+
         i <- i+1
-        r' <- !r.r.P |]
+        r' <- !r.r.P
+    |]
+
+let d_training_data_20, d_target_data_20 = make_data_from_set 20
+let d_training_data_validation, d_target_data_validation = make_data_from_set 30
 
 let hidden_size = 64
 
 let l1 = LSTMLayer.createRandomLSTMLayer hidden_size 7 tanh_ tanh_
 let l2 = Layer.createRandomLayer 7 hidden_size sigmoid
 
-let d_training_data_20, d_target_data_20 = make_data_from_set 20
-let d_training_data_validation, d_target_data_validation = make_data_from_set 30
-
-let tape_t = tapeType()
-let tape_v = tapeType()
+// Add the base nodes to the tape for easier resetting and disposal.
+tape.Select -1
+let base_nodes = [|l1.ToArray;l2.ToArray|] |> Array.concat |> Array.iter (fun x -> tape.Add x)
 
 #time
 let s = [|
-        yield lstm_embedded_reber_train 100 5.0f d_training_data_20 d_target_data_20 d_training_data_validation d_target_data_validation 1.0f l1 l2 tape_t tape_v
+        yield lstm_embedded_reber_train 100 5.0f d_training_data_20 d_target_data_20 d_training_data_validation d_target_data_validation 1.0f l1 l2
         |] |> Array.concat
 #time
 // On the GTX 970, I get 3-4s depending on how hot the GPU is.
@@ -111,3 +116,4 @@ let l = [|for l,_ in s do yield l|]
 let r = [|for _,r in s do yield r|]
 
 (Chart.Combine [|Chart.Line l;Chart.Line r|]).ShowChart()
+tape.DisposeAll()

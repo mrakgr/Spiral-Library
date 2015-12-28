@@ -171,6 +171,7 @@ let gemm2 transa transb (alpha: floatType) (A:dMatrix) (B:dMatrix) beta (C:dMatr
 
     let C_dArray = C.dArray
     if m <> C.num_rows || n <> C.num_cols then failwith "m <> C.num_rows || n <> C.num_cols in gemm2"
+
     cublas.Gemm(transa, transb, m, n, k, alpha, A.dArray, lda, B.dArray, ldb, beta, C_dArray, ldc)
 
 /// General matrix-matrix addition.
@@ -736,735 +737,6 @@ type dMatrix with
         // 2.0f*scaling_factor ensures that it is rescaled around zero if the scaling_factor is 1.0f.
         randMapModule.A(2.0f*scaling_factor,t.dArray,location,t.dArray,t.dArray)
 
-type Df_rec = {
-    P: floatType ref
-    A : floatType ref
-    is_constant : bool
-    } with
-
-    static member create P =
-        {P=P;A=ref 0.0f;is_constant=false}
-    static member createConstant P =
-        {P=P;A=ref 0.0f;is_constant=true}
-
-type DM_rec = {
-    P: dMatrix ref
-    A : dMatrix ref
-    is_constant : bool
-    } with
-
-    static member create (P: dMatrix) =
-        {P=ref P;A=ref <| P.zeroLike();is_constant=false}
-        
-    static member createConstant (P: dMatrix) =
-        {P=ref P;A=ref (dMatrix.createEmpty);is_constant=true}
-
-    static member createEmpty =
-        {P=ref (dMatrix.createEmpty);A=ref (dMatrix.createEmpty);is_constant=false}
-        
-    static member createEmptyConstant =
-        {P=ref (dMatrix.createEmpty);A=ref (dMatrix.createEmpty);is_constant=true}
-
-    /// Resizes the primal and the adjoint if they are below nr*nc in size.
-    member t.Resize nr nc =
-        let p = t.P
-        let a = t.A
-
-        // This is an optimization to prevent an clogup of dMatrix objects here.
-        // GC can't free up memory if the dMatrix instances are pointing to the same dArray.
-
-        // If the class is larger, replace the reference else the function will mutably just adjust
-        // the num_rows and num_col fields.
-        (!p).ReplaceIf nr nc
-        (!a).ReplaceIf nr nc
-        
-
-type Rf =
-    | DfR_Df_DM of Df_rec * (unit -> unit) * (unit -> unit) * RDM
-    | DfR_Df_Dfseq of Df_rec * (unit -> unit) * (unit -> unit) * Rf []
-
-    member t.r =
-        match t with
-        | DfR_Df_DM(x,_,_,_) -> x
-        | DfR_Df_Dfseq(x,_,_,_) -> x
-
-    member t.triggerForward() =
-        match t with
-        | DfR_Df_DM(x,ff,_,_) -> ff()
-        | DfR_Df_Dfseq(x,ff,_,_) -> ff()
-
-    member t.triggerBackward() =
-        match t with
-        | DfR_Df_DM(x,_,fb,_) -> fb()
-        | DfR_Df_Dfseq(x,_,fb,_) -> fb()
-
-and RDM = 
-    | DM of DM_rec
-    | DMR of DM_rec * ff: (unit -> unit) * db: (unit -> unit) * nodes: RDM[]
-    // Looking at it now, I just realized that all these types (except DM) are redundant and could be replaced with DMRlin.
-
-    member t.r =
-        match t with
-        | DM x -> x
-        | DMR(x,_,_,_) -> x
-
-    member t.triggerForward() =
-        match t with
-        | DM _ -> ()
-        | DMR(x,ff,_,_) -> ff()
-
-    member t.triggerBackward() =
-        match t with
-        | DM _ -> ()
-        | DMR(_,_,fb,_) -> fb()
-
-    static member makeNode(hidden_size, input_size) =
-        let p = dMatrix.create(hidden_size,input_size)
-        DM (DM_rec.create p)
-
-    static member makeNode(hidden_size, input_size, input: floatType[]) =
-        if hidden_size*input_size <> input.Length then failwith "hidden_size*input_size <> input.Length in makeNode."
-        let p = dMatrix.create(hidden_size,input_size, input)
-        DM (DM_rec.create p)
-
-    static member makeConstantNode(hidden_size, input_size, input: floatType[]) =
-        if hidden_size*input_size <> input.Length then failwith "hidden_size*input_size <> input.Length in makeConstantNode."
-        let p = dMatrix.create(hidden_size,input_size, input)
-        DM (DM_rec.createConstant p)
-
-    static member makeUniformRandomNode(hidden_size,input_size) =
-        let scale = (1.0f / sqrt(hidden_size+input_size |> floatType))
-        let p = dMatrix.createRandomUniformMatrix hidden_size input_size scale 0.0f
-        DM (DM_rec.create p)
-
-// The type for the tape.
-type R = 
-    | Rf of Rf 
-    | RDM of RDM
-    
-    member t.resetAdjoint() =
-        match t with
-        | Rf x -> x.r.A := 0.0f
-        | RDM x -> (!x.r.A).setZero()
-
-    member t.resetPrimal() =
-        match t with
-        | Rf x -> x.r.P := 0.0f
-        | RDM x -> (!x.r.P).setZero()
-
-    member t.triggerForward() =
-        match t with
-        | Rf x -> x.triggerForward()
-        | RDM x -> x.triggerForward()
-
-    member t.triggerBackward() =
-        match t with
-        | Rf x -> x.triggerBackward()
-        | RDM x -> x.triggerBackward()
-
-type tapeType = System.Collections.Generic.List<R>
-let mutable tape = tapeType(1000)
-
-let hadamaradMultiplicationModule = new DeviceBinaryTransformModule "x*y;"
-let hadamaradMultiplicationErrorModule = new DeviceTrinaryTransformModule "x*y+z;"
-let hadmult (a: RDM) (b: RDM) =
-    let va = a.r.P
-    let vb = b.r.P
-    let el = a.r.A
-    let er = b.r.A
-
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-
-    let ff () = 
-        let nr, nc = (!va).rc
-        node.Resize nr nc
-        hadamaradMultiplicationModule.A(!va, !vb, !c)
-    let fb () = 
-        hadamaradMultiplicationErrorModule.A(!vb,!error,!el,!el)
-        hadamaradMultiplicationErrorModule.A(!va,!error,!er,!er)
-    let t = DMR(node,ff,fb,[|a;b|])
-    tape.Add(RDM t)
-    t
-
-
-/// This is an optimization of the linear layer because the best optimization is to remove operations entirely.
-/// Doing it standardly involves too many unnecessary allocations.
-/// Can be used for both matrix-matrix standards and Hadamarad multiplications, but it is not intended that they be used at the same time.
-/// It might be good to split this function for that reason.
-let linear_layer (mm: (RDM*RDM) []) (hads: (RDM*RDM) []) (bias: RDM option) =
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-
-    let ff() =
-        if mm.Length > 0 then 
-            let l,r = mm.[0]
-            let nr = (!l.r.P).num_rows
-            let nc = (!r.r.P).num_cols
-            node.Resize nr nc
-        else if hads.Length > 0 then
-            let l,r = hads.[0]
-            let nr,nc = (!l.r.P).rc
-            node.Resize nr nc
-        else failwith "Invalid input into linear_layer."
-
-        match bias with
-        | Some bias -> broadcastAdd2 0.0f !c 1.0f !bias.r.P
-        | None -> (!c).setZero()
-                
-        for l,r in mm do gemm2 nT nT 1.0f !l.r.P !r.r.P 1.0f !c
-        for l,r in hads do hadamaradMultiplicationErrorModule.A(!l.r.P, !r.r.P, !c, !c)
-
-    let fb() =
-        for l,r in mm do
-            if l.r.is_constant = false then gemm2 nT T 1.0f !error !r.r.P 1.0f !l.r.A
-            if r.r.is_constant = false then gemm2 T nT 1.0f !l.r.P !error 1.0f !r.r.A
-        for l,r in hads do 
-            hadamaradMultiplicationErrorModule.A(!error, !r.r.P, !l.r.A, !l.r.A)
-            hadamaradMultiplicationErrorModule.A(!l.r.P, !error, !r.r.A, !r.r.A)
-        
-        match bias with
-        | Some bias -> rowSum2 1.0f !error 1.0f !bias.r.A
-        | None -> ()
-    let ar =
-        [|
-        for l,r in mm do yield l; yield r
-        for l,r in hads do yield l; yield r
-        match bias with
-        | Some bias -> yield bias 
-        | None -> () |]
-    let t = DMR(node,ff,fb,ar)
-    tape.Add(RDM t)
-    t
-
-let matmult (a: RDM) (b:RDM) =
-    let va = a.r.P
-    let vb = b.r.P
-    let el = a.r.A
-    let er = b.r.A
-
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-        
-    let ff () = 
-        let nr = (!va).num_rows
-        let nc = (!vb).num_cols
-        node.Resize nr nc
-        gemm2 nT nT 1.0f !va !vb 0.0f !c
-    let fb () = 
-        if a.r.is_constant = false then gemm2 nT T 1.0f !error !vb 1.0f !el// The derivative with respect to the left. So the above argument gets inserted from the right left. Usually error * input.
-        if b.r.is_constant = false then gemm2 T nT 1.0f !va !error 1.0f !er// The derivative with respect to the right. So the above argument gets inserted from the right side. Usually weights * error.
-    let t = DMR(node,ff,fb,[|a;b|])
-    tape.Add(RDM t)
-    t
-
-/// Addition with broadcasting.
-let addb (a: RDM) (b: RDM) = // b is for bias and a is for preactivations.
-    let va = a.r.P
-    let vb = b.r.P
-    let el = a.r.A
-    let er = b.r.A
-
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-
-    let ff () = 
-        let nr,nc = (!va).rc
-        node.Resize nr nc
-        geam2 nT nT 1.0f !va 0.0f !c !c
-        broadcastAdd2 1.0f !c 1.0f !vb
-    let fb () = 
-        geam2 nT nT 1.0f !el 1.0f !error !el
-        rowSum2 1.0f !error 1.0f !er
-    let t = DMR(node,ff,fb,[|a;b|])
-    tape.Add(RDM t)
-    t
-
-let sigmoidModule = new DeviceUnaryTransformModule "1.0f/(1.0f+expf(-x));"
-//y = error
-//z = previous adjoint value
-let sigmoidErrorModule = new DeviceTrinaryTransformModule "x*(1.0f-x)*y + z;"
-let sigmoid (a:RDM) =
-    let va = a.r.P
-    let el = a.r.A
-
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-
-    let ff () = 
-        let nr,nc = (!va).rc
-        node.Resize nr nc
-        sigmoidModule.A(!va,!c)
-    let fb () = sigmoidErrorModule.A(!c,!error,!el,!el)
-    let t = DMR(node,ff,fb,[|a|])
-    tape.Add(RDM t)
-    t
-
-let tanhModule = new DeviceUnaryTransformModule "tanhf(x);"
-//y = error
-//z = previous adjoint value
-let tanhErrorModule = new DeviceTrinaryTransformModule "(1.0f-x*x)*y + z;"
-let tanh_ (a:RDM) =
-    let va = a.r.P
-    let el = a.r.A
-
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-
-    let ff () = 
-        let nr,nc = (!va).rc
-        node.Resize nr nc
-        tanhModule.A(!va,!c)
-    let fb () = tanhErrorModule.A(!c,!error,!el,!el)
-    let t = DMR(node,ff,fb,[|a|])
-    tape.Add(RDM t)
-    t
-
-let add alpha (a: RDM) beta (b: RDM) =
-    let va = a.r.P
-    let vb = b.r.P
-    let el = a.r.A
-    let er = b.r.A
-
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-
-    let ff () = 
-        let nr,nc = (!va).rc
-        node.Resize nr nc
-        geam2 nT nT alpha !va beta !vb !c
-    let fb () = 
-        let nr,nc = (!va).rc
-        if (a.r.is_constant) = false then geam2 nT nT alpha !error 1.0f !el !el
-        if (b.r.is_constant) = false then geam2 nT nT 1.0f !er beta !error !er
-    let t = DMR(node,ff,fb,[|a;b|])
-    tape.Add(RDM t)
-    t
-
-(*
-/// The old inneficient linear layer that just does everything as a sequence of matrix multiplication operation. For debugging purposes.
-let linear_layer_ (mm: (RDM*RDM) []) (hh: (RDM*RDM) []) (bias: RDM option) =
-    let mats = [|for l,r in mm do yield matmult l r|]
-    let hads = [|for l,r in hh do yield hadmult l r|]
-    let t = [|mats;hads|] |> Array.concat
-    let sum = Array.fold (fun state x -> add 1.0f state 1.0f x) t.[0] t.[1..]
-    match bias with
-    | Some bias -> addb sum bias
-    | None -> sum
-*)
-
-let squareModule = new DeviceUnaryTransformModule "x*x;"
-//y = error
-//z = previous adjoint value
-let squareErrorModule = new DeviceTrinaryTransformModule "2.0f*x*y + z;"
-let square (a:RDM) =
-    let va = a.r.P
-    let el = a.r.A
-
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-
-    let ff () = 
-        let nr,nc = (!va).rc
-        node.Resize nr nc
-        squareModule.A(!va,!c)
-    let fb () = squareErrorModule.A(!va,!error,!el,!el)
-    let t = DMR(node,ff,fb,[|a|])
-    tape.Add(RDM t)
-    t
-
-let sumModule = new DeviceUnaryMapSumModule "x;"
-let sumErrorModule = new DeviceUnaryCoefTransformModule "coef_x + x;" 
-let sum (a:RDM) =
-    let va = a.r.P
-    let el = a.r.A
-
-    let node = Df_rec.create (ref 0.0f)
-    let error = node.A
-    
-    let ff () = node.P := sumModule.A(!va)
-    let fb () = sumErrorModule.A(!error,!el,!el)
-    let t = DfR_Df_DM(node,ff,fb,a)
-    tape.Add(Rf t)
-    t
-
-let scale (alpha: floatType) (a:Rf) =
-    let node = Df_rec.create (ref 0.0f)
-
-    let ff () = node.P := alpha * !a.r.P
-    let fb () = a.r.A := alpha * !node.A + !a.r.A
-    let t = DfR_Df_Dfseq(node,ff,fb,[|a|])
-    tape.Add(Rf t)
-    t
-
-let sum_scalars (a:Rf[]) =
-
-    let node = Df_rec.create (ref 0.0f)
-
-    let ff () = 
-        let c = ref 0.0f
-        for l in a do c := !c + !l.r.P
-        node.P := !c
-    let fb () = 
-        for l in a do l.r.A := !node.A + !l.r.A
-    let t = DfR_Df_Dfseq(node,ff,fb,a)
-    tape.Add(Rf t)
-    t
-
-let logModule = new DeviceUnaryTransformModule "logf(x);"
-//y=error
-//z=previous adjoint
-let logErrorModule = new DeviceTrinaryTransformModule "y / x + z;"
-let log_ (a:RDM) =
-    let va = a.r.P
-    let el = a.r.A
-
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-
-    let ff () = 
-        let nr,nc = (!va).rc
-        node.Resize nr nc
-        logModule.A(!va,!c)
-    let fb () = logErrorModule.A(!va,!error, !el, !el)
-    let t = DMR(node,ff,fb,[|a|])
-    tape.Add(RDM t)
-    t
-
-//coef_x = scalar
-//coef_y = coef
-let scalarMatrixAddModule = new DeviceBinaryCoefTransformModule "coef_x + coef_y*x;"
-let scalar_matrix_add scalar coef (a:RDM) =
-    let va = a.r.P
-    let el = a.r.A
-
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-
-    let ff () = 
-        let nr,nc = (!va).rc
-        node.Resize nr nc
-        scalarMatrixAddModule.A(scalar,!va,coef,!va,!c)
-    let fb () = geam2 nT nT coef !error 1.0f !el !el
-    let t = DMR(node,ff,fb,[|a|])
-    tape.Add(RDM t)
-    t
-
-//coef_x=scalar
-let scalarAddModule = new DeviceUnaryCoefTransformModule "coef_x + x;"
-let scalar_add (a:RDM) b =
-    let va = a.r.P
-    let el = a.r.A
-
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-
-    let ff () = 
-        let nr,nc = (!va).rc
-        node.Resize nr nc
-        scalarAddModule.A(b,!va,!c)
-    let fb () = geam2 nT nT 1.0f !error 1.0f !el !el
-    let t = DMR(node,ff,fb,[|a|])
-    tape.Add(RDM t)
-    t
-
-let neg (a:RDM) =
-    let va = a.r.P
-    let el = a.r.A
-
-    let node = DM_rec.createEmpty
-    let c = node.P
-    let error = node.A
-
-    let ff () = 
-        let nr,nc = (!va).rc
-        node.Resize nr nc
-        geam2 nT nT -1.0f !va 0.0f !va !c
-    let fb () = geam2 nT nT -1.0f !error 1.0f !el !el
-    let t = DMR(node,ff,fb,[|a|])
-    tape.Add(RDM t)
-    t
-
-let cross_entropy_cost target activations =
-    let cross_ent = linear_layer [||] [|target,log_ activations;scalar_matrix_add 1.0f -1.0f target, log_ (scalar_matrix_add 1.0f -1.0f activations)|] None
-    let s = sum cross_ent
-    scale (-1.0f/floatType (!target.r.P).num_cols) s
-
-let squared_error_cost target activations =
-    let r1 = add 1.0f target -1.0f activations
-    let r2 = square r1
-    let r3 = sum r2
-    scale (0.5f/floatType (!target.r.P).num_cols) r3
-
-// A recurrent layer of neurons
-type Layer =
-    {
-    W:RDM  // Input weight matrix
-    U:RDM  // Recurrent weight matrix
-    b:RDM  // Bias vector
-    a:RDM->RDM
-    } with     // Activation function
-     
-    member l.ToArray = 
-        [|l.W;l.U;l.b|]
-
-    static member fromArray (a : RDM[]) act =
-        {
-         W = a.[0]
-         U = a.[1]
-         b = a.[2]
-         a = act
-        }
-
-    static member createRandomLayer hidden_size input_size act =
-        {
-         W = RDM.makeUniformRandomNode(hidden_size, input_size)
-         U = RDM.makeUniformRandomNode(hidden_size, hidden_size)
-         b = RDM.makeUniformRandomNode(hidden_size, 1)
-         a = act
-        } 
-
-    // For the section with no previous hidden state.
-    member l.runLayerNoH (x:RDM) =
-        linear_layer [|l.W,x|] [||] (Some l.b) |> l.a
-    
-    // For the section with no input
-    member l.runLayerNoI (y:RDM) =
-        linear_layer [|l.U,y|] [||] (Some l.b) |> l.a
-
-    // For the section with previous hidden state
-    member l.runLayer (x:RDM) (y:RDM) =
-        linear_layer [|l.W,x;l.U,y|] [||] (Some l.b) |> l.a
-
-
-type GRULayer =
-    {W_u:RDM  // Input weight matrix for the update gate
-     U_u:RDM  // Recurrent weight matrix for the update gate
-     b_u:RDM  // Bias vector for the update gate
-
-     W_r:RDM  // Input weight matrix for the reset gate
-     U_r:RDM  // Recurrent weight matrix for the reset gate
-     b_r:RDM  // Bias vector for the reset gate
-
-     W_n:RDM  // Input weight matrix for the potential new state
-     U_n:RDM  // Recurrent weight matrix for the potential new state
-     b_n:RDM  // Bias vector for the potential new state
-
-     a : RDM -> RDM
-     } with
-    
-    /// Returns all the weights in an array.
-    member l.ToArray =
-        [|l.W_u;l.U_u;l.b_u;l.W_r;l.U_r;l.b_r;l.W_n;l.U_n;l.b_n|]
-
-    static member createRandomGRULayer hidden_size input_size act =
-        {
-        W_u = RDM.makeUniformRandomNode(hidden_size, input_size)
-        U_u = RDM.makeUniformRandomNode(hidden_size, hidden_size)
-        b_u = RDM.makeUniformRandomNode(hidden_size, 1)
-
-        W_r = RDM.makeUniformRandomNode(hidden_size, input_size)
-        U_r = RDM.makeUniformRandomNode(hidden_size, hidden_size)
-        b_r = RDM.makeUniformRandomNode(hidden_size, 1)
-
-        W_n = RDM.makeUniformRandomNode(hidden_size, input_size)
-        U_n = RDM.makeUniformRandomNode(hidden_size, hidden_size)
-        b_n = RDM.makeUniformRandomNode(hidden_size, 1)
-
-        a = act
-        }
-
-    // For the section with no previous hidden state.
-    member l.runLayerNoH (x:RDM) =
-        let update_gate = linear_layer [|l.W_u,x|] [||] (Some l.b_u) |> sigmoid
-        let potential_new_state = linear_layer [|l.W_n,x|] [||] (Some l.b_n) |> l.a
-        let output_b = hadmult (scalar_matrix_add 1.0f -1.0f update_gate) potential_new_state
-        output_b
-    
-    // For the section with no input
-    member l.runLayerNoI (y:RDM) =
-        let update_gate = linear_layer [|l.U_u,y|] [||] (Some l.b_u) |> sigmoid
-        let reset_gate = linear_layer [|l.U_r,y|] [||] (Some l.b_r) |> sigmoid
-        let potential_new_state = linear_layer [|l.U_n, (hadmult reset_gate y)|] [||] (Some l.b_n) |> l.a
-        linear_layer [||] [|update_gate,y;(scalar_matrix_add 1.0f -1.0f update_gate),potential_new_state|] None
-
-    // For the section with previous hidden state
-    member l.runLayer (x:RDM) (y:RDM) =
-        let update_gate = linear_layer [|l.W_u,x;l.U_u,y|] [||] (Some l.b_u) |> sigmoid
-        let reset_gate = linear_layer [|l.W_r,x;l.U_r,y|] [||] (Some l.b_r) |> sigmoid
-        let potential_new_state = linear_layer [|l.W_n,x;l.U_n, (hadmult reset_gate y)|] [||] (Some l.b_n) |> l.a
-        linear_layer [||] [|update_gate,y;(scalar_matrix_add 1.0f -1.0f update_gate),potential_new_state|] None
-
-let forwardpropTape (tape: Generic.List<R>) = for i=0 to tape.Count-1 do tape.[i].triggerForward()
-let reversepropTape (tape: Generic.List<R>) = for i=tape.Count-1 downto 0 do tape.[i].triggerBackward()
-let resetTapeAdjoint (tape: Generic.List<R>) = for x in tape do x.resetAdjoint()
-let resetTapePrimal (tape: Generic.List<R>) = for x in tape do x.resetPrimal()
-
-let add_gradients_to_weights (base_nodes: RDM[]) learning_rate clip_coef = 
-    for x in base_nodes do 
-        gradclipModule.A(clip_coef,!x.r.A,!x.r.A)
-        geam2 nT nT 1.0f !x.r.P -learning_rate !x.r.A !x.r.P
-
-let nesterov_add_gradients (base_nodes: RDM[]) (momentum_matrices: dMatrix[]) (copy_weights: dMatrix[]) learning_rate momentum_rate clip_coef = 
-    for i=0 to base_nodes.Length-1 do
-        let x = base_nodes.[i] 
-        let m = momentum_matrices.[i]
-        let c = copy_weights.[i]
-        gradclipModule.A(clip_coef,!x.r.A,!x.r.A)
-        geam2 nT nT -learning_rate !x.r.A momentum_rate m m // Add the gradients to the momentum matrices
-        geam2 nT nT 1.0f m 1.0f c c // Add momentum to the copy matrix
-        geam2 nT nT 1.0f c momentum_rate m !x.r.P // Apply Nesterov's momentum to the weights. It is really the copy weights that serve as the basis.
-
-let save_data filename (ar: RDM []) =
-    let stream_data = File.OpenWrite(filename)
-    let writer_data = new BinaryWriter(stream_data)
-
-    // Magic number
-    writer_data.Write(929856)
-
-    writer_data.Write(ar.Length)
-    for x in ar do
-        writer_data.Write((!x.r.P).num_rows)
-        writer_data.Write((!x.r.P).num_cols)
-        let t = (!x.r.P).dArray.Gather()
-        for f in t do writer_data.Write(f)
-
-    writer_data.Close()
-    stream_data.Close()
-
-let load_data file_name is_constant =
-    let stream_data = File.OpenRead(file_name)
-    let reader_data = new BinaryReader(stream_data)
-
-    let m = reader_data.ReadInt32()
-    if m <> 929856 then failwith "Wrong file type in load_weights"
-
-    let l = reader_data.ReadInt32()
-    let weights = [|
-        for i=1 to l do
-            let num_rows = reader_data.ReadInt32()
-            let num_cols = reader_data.ReadInt32()
-            let ar = [|for x=1 to num_rows*num_cols do yield reader_data.ReadSingle()|]
-            match is_constant with
-            | true -> yield RDM.makeConstantNode(num_rows,num_cols,ar)
-            | false -> yield RDM.makeNode(num_rows,num_cols,ar)
-        |]
-
-    reader_data.Close()
-    stream_data.Close()
-    weights
-
-type LSTMLayer =
-    {W_z:RDM  // Input weight matrix for the block input
-     U_z:RDM  // Recurrent weight matrix for the block input
-     b_z:RDM  // Bias vector for the block input
-
-     W_i:RDM  // Input weight matrix for the input gate
-     U_i:RDM  // Recurrent weight matrix for the input gate
-     b_i:RDM  // Bias vector for the input gate
-     P_i:RDM  // Peephole weight matrix for the input gate
-
-     W_f:RDM  // Input weight matrix for the forget gate
-     U_f:RDM  // Recurrent weight matrix for the forget gate
-     b_f:RDM  // Bias vector for the forget gate
-     P_f:RDM  // Peephole weight matrix for the forget gate
-
-     W_o:RDM  // Input weight matrix for the output gate
-     U_o:RDM  // Recurrent weight matrix for the output gate
-     b_o:RDM  // Bias vector for the output gate
-     P_o:RDM  // Peephole weight matrix for the output gate
-
-     block_input_a : RDM -> RDM
-     block_output_a : RDM -> RDM
-     } with
-    
-    /// Returns all the weights in an array.
-    member l.ToArray = [|l.W_z;l.U_z;l.b_z;l.W_i;l.U_i;l.b_i;l.P_i;l.W_f;l.U_f;l.b_f;l.P_f;l.W_o;l.U_o;l.b_o;l.P_o|]
-    static member fromArray (a: RDM[]) block_input_a block_output_a =
-        {
-         W_z = a.[0]
-         U_z = a.[1]
-         b_z = a.[2]
-
-         W_i = a.[3]
-         U_i = a.[4]
-         b_i = a.[5]
-         P_i = a.[6]
-
-         W_f = a.[7]
-         U_f = a.[8]
-         b_f = a.[9]
-         P_f = a.[10]
-
-         W_o = a.[11]
-         U_o = a.[12]
-         b_o = a.[13]
-         P_o = a.[14]
-
-         block_input_a = block_input_a
-         block_output_a = block_output_a
-        }
-
-    static member createRandomLSTMLayer hidden_size input_size block_input_a block_output_a =
-        {
-        W_z = RDM.makeUniformRandomNode(hidden_size, input_size)
-        U_z = RDM.makeUniformRandomNode(hidden_size, hidden_size)
-        b_z = RDM.makeUniformRandomNode(hidden_size, 1)
-
-        W_i = RDM.makeUniformRandomNode(hidden_size, input_size)
-        U_i = RDM.makeUniformRandomNode(hidden_size, hidden_size)
-        b_i = RDM.makeUniformRandomNode(hidden_size, 1)
-        P_i = RDM.makeUniformRandomNode(hidden_size, hidden_size)
-
-        W_f = RDM.makeUniformRandomNode(hidden_size, input_size)
-        U_f = RDM.makeUniformRandomNode(hidden_size, hidden_size)
-        b_f = RDM.makeUniformRandomNode(hidden_size, 1)
-        P_f = RDM.makeUniformRandomNode(hidden_size, hidden_size)
-
-        W_o = RDM.makeUniformRandomNode(hidden_size, input_size)
-        U_o = RDM.makeUniformRandomNode(hidden_size, hidden_size)
-        b_o = RDM.makeUniformRandomNode(hidden_size, 1)
-        P_o = RDM.makeUniformRandomNode(hidden_size, hidden_size)
-
-        block_input_a = block_input_a
-        block_output_a = block_output_a
-        }
-
-    member l.runLayer (x:RDM) (y:RDM) (c:RDM) =
-        let block_input = linear_layer [|l.W_z,x;l.U_z,y|] [||] (Some l.b_z) |> l.block_input_a
-        let input_gate = linear_layer [|l.W_i,x;l.U_i,y;l.P_i,c|] [||] (Some l.b_i) |> sigmoid
-        let forget_gate = linear_layer [|l.W_f,x;l.U_f,y;l.P_f,c|] [||] (Some l.b_f) |> sigmoid
-        let c' = linear_layer [||] [|block_input,input_gate;c,forget_gate|] None
-        let output_gate = linear_layer [|l.W_o,x;l.U_o,y;l.P_o,c'|] [||] (Some l.b_o) |> sigmoid
-        hadmult (l.block_output_a c') output_gate, c'
-
-    member l.runLayerNoH (x:RDM) =
-        let block_input = linear_layer [|l.W_z,x|] [||] (Some l.b_z) |> l.block_input_a
-        let input_gate = linear_layer [|l.W_i,x|] [||] (Some l.b_i) |> sigmoid
-        let forget_gate = linear_layer [|l.W_f,x|] [||] (Some l.b_f) |> sigmoid
-        let c' = hadmult block_input input_gate
-        let output_gate = linear_layer [|l.W_o,x;l.P_o,c'|] [||] (Some l.b_o) |> sigmoid
-        hadmult (l.block_output_a c') output_gate, c'
-
-    member l.runLayerNoI (y:RDM) (c:RDM) =
-        let block_input = linear_layer [|l.U_z,y|] [||] (Some l.b_z) |> l.block_input_a
-        let input_gate = linear_layer [|l.U_i,y;l.P_i,c|] [||] (Some l.b_i) |> sigmoid
-        let forget_gate = linear_layer [|l.U_f,y;l.P_f,c|] [||] (Some l.b_f) |> sigmoid
-        let c' = linear_layer [||] [|block_input,input_gate;c,forget_gate|] None
-        let output_gate = linear_layer [|l.U_o,y;l.P_o,c'|] [||] (Some l.b_o) |> sigmoid
-        hadmult (l.block_output_a c') output_gate, c'
-
 type DeviceGetSliceModule() = 
     let block_size = 256
 
@@ -1613,6 +885,7 @@ type DeviceSetSliceModule() =
         let order = 0u
         let row_stride = end_row-start_row+1
         let col_stride = end_col-start_col+1
+        if y.rc <> (row_stride,col_stride) then failwith "y.rc <> row_stride,col_stride"
         let n = row_stride*col_stride
         let gridSize = divup n block_size
         kernel.GridDimensions <- dim3(gridSize)
@@ -1627,14 +900,15 @@ type DeviceSetSliceModule() =
         let order = 1u
         let row_stride = end_row-start_row+1
         let col_stride = end_col-start_col+1
+        if y.rc <> (row_stride,col_stride) then failwith "y.rc <> row_stride,col_stride"
         let n = row_stride*col_stride
         let gridSize = divup n block_size
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
         kernel.RunAsync(str.Stream, x.dArray.DevicePointer,y.dArray.DevicePointer,start_row, end_row, x.num_rows, start_col, end_col, x.num_cols, order) |> ignore
 
-// The Item and GetSlice operators. Row major.
-
+// The Item and GetSlice operators. Column major
+let setsliceModule = DeviceSetSliceModule()
 let getsliceModule = DeviceGetSliceModule()
 
 type dMatrix with
@@ -1644,18 +918,774 @@ type dMatrix with
         let rowFinish = defaultArg rowFinish (t.num_rows-1)
         let colStart = defaultArg colStart 0
         let colFinish = defaultArg colFinish (t.num_cols-1)
-        getsliceModule.AR(t,rowStart,rowFinish,colStart,colFinish)
+        getsliceModule.AC(t,rowStart,rowFinish,colStart,colFinish)
 
     member t.GetSlice(row: int, colStart: int option, colFinish: int option) =
             let colStart = defaultArg colStart 0
             let colFinish = defaultArg colFinish t.num_cols-1
-            getsliceModule.AR(t,row,row,colStart,colFinish)
+            getsliceModule.AC(t,row,row,colStart,colFinish)
 
     member t.GetSlice(rowStart: int option, rowFinish: int option, col: int) =
             let rowStart = defaultArg rowStart 0
             let rowFinish = defaultArg rowFinish t.num_rows-1
-            getsliceModule.AR(t,rowStart,rowFinish,col,col)
+            getsliceModule.AC(t,rowStart,rowFinish,col,col)
+
+    member t.SetSlice(rowStart: int option, rowFinish : int option,
+                         colStart: int option, colFinish : int option, y) =
+        let rowStart = defaultArg rowStart 0
+        let rowFinish = defaultArg rowFinish (t.num_rows-1)
+        let colStart = defaultArg colStart 0
+        let colFinish = defaultArg colFinish (t.num_cols-1)
+        setsliceModule.AC(t,y,rowStart,rowFinish,colStart,colFinish)
+
+    member t.SetSlice(row: int, colStart: int option, colFinish: int option,y) =
+            let colStart = defaultArg colStart 0
+            let colFinish = defaultArg colFinish t.num_cols-1
+            setsliceModule.AC(t,y,row,row,colStart,colFinish)
+
+    member t.SetSlice(rowStart: int option, rowFinish: int option, col: int,y) =
+            let rowStart = defaultArg rowStart 0
+            let rowFinish = defaultArg rowFinish t.num_rows-1
+            setsliceModule.AC(t,y,rowStart,rowFinish,col,col)
 
 
+type Df_rec = {
+    P : floatType ref
+    A : floatType ref
+    is_constant : bool
+    } with
+
+    static member create P =
+        {P=P;A=ref 0.0f;is_constant=false}
+    static member createConstant P =
+        {P=P;A=ref 0.0f;is_constant=true}
+
+type DM_rec = {
+    P : dMatrix ref
+    A : dMatrix ref
+    is_constant : bool
+    } with
+
+    static member create (P: dMatrix) =
+        {P=ref P;A=ref <| P.zeroLike();is_constant=false}
+        
+    static member createConstant (P: dMatrix) =
+        {P=ref P;A=ref (dMatrix.createEmpty);is_constant=true}
+
+    static member createEmpty =
+        {P=ref (dMatrix.createEmpty);A=ref (dMatrix.createEmpty);is_constant=false}
+        
+    static member createEmptyConstant =
+        {P=ref (dMatrix.createEmpty);A=ref (dMatrix.createEmpty);is_constant=true}
+
+    /// Resizes the primal and the adjoint if they are below nr*nc in size.
+    member t.Resize nr nc =
+        let p = t.P
+        let a = t.A
+
+        // This is an optimization to prevent an clogup of dMatrix objects here.
+        // GC can't free up memory if the dMatrix instances are pointing to the same dArray.
+
+        // If the class is larger, replace the reference else the function will mutably just adjust
+        // the num_rows and num_col fields.
+        (!p).ReplaceIf nr nc
+        (!a).ReplaceIf nr nc
+
+    member t.Dispose() = 
+        (!t.P :> IDisposable).Dispose()
+        (!t.A :> IDisposable).Dispose()
+
+let Noop() = ()
+type Df = 
+    {
+    r: Df_rec
+    ff : (unit -> unit)
+    fb : (unit -> unit)
+    }
+    static member create(r,ff,fb) = {r=r;ff=ff;fb=fb}
+and DM =
+    {
+    r: DM_rec
+    ff : (unit -> unit)
+    fb : (unit -> unit)
+    }
+    static member create(r,ff,fb) = {r=r;ff=ff;fb=fb}
+
+    static member makeNode(hidden_size, input_size) =
+        let p = dMatrix.create(hidden_size,input_size)
+        {r=DM_rec.create p;ff=Noop;fb=Noop}
+
+    static member makeNode(hidden_size, input_size, input: floatType[]) =
+        let p = dMatrix.create(hidden_size,input_size, input)
+        {r=DM_rec.create p;ff=Noop;fb=Noop}
+
+    static member makeConstantNode(hidden_size, input_size, input: floatType[]) =
+        let p = dMatrix.create(hidden_size,input_size, input)
+        {r=DM_rec.createConstant p;ff=Noop;fb=Noop}
+
+    static member makeUniformRandomNode(hidden_size,input_size) =
+        let scale = (1.0f / sqrt(hidden_size+input_size |> floatType))
+        let p = dMatrix.createRandomUniformMatrix hidden_size input_size scale 0.0f
+        {r=DM_rec.create p;ff=Noop;fb=Noop}
+
+open System.Collections.Generic
+type tapeType() =
+    let d = Dictionary<int,List<obj>>()
+    let mutable select = 0
+    /// Instantiates a new List if none is present at the selection and adds to it, else it just adds to the selected one.
+    /// The default select is 0.
+    member t.Add a =
+        if d.ContainsKey(select) = false then
+            let tape = List<obj>()
+            d.Add(select,tape)
+            tape.Add(a)
+        else
+            let tape = d.[select]
+            tape.Add(a)
+
+    /// Sets the select to input.
+    member t.Select i = select <- i
+
+    /// Runs all the forward functions in the currently selected tape.
+    member t.forwardpropTape select = 
+        let tape = d.[select]
+        for i=0 to tape.Count-1 do 
+            match tape.[i] with
+            | :? Df as x -> x.ff()
+            | :? DM as x -> x.ff()
+            | _ -> failwith "Type not supported"
+    /// Runs all the backward functions in the currently selected tape, starting from the top.
+    member t.reversepropTape select = 
+        let tape = d.[select]
+        for i=tape.Count-1 downto 0 do 
+            match tape.[i] with
+            | :? Df as x -> x.fb()
+            | :? DM as x -> x.fb()
+            | _ -> failwith "Type not supported"
+    /// Resets the adjoints of the selected tape.
+    member t.resetTapeAdjoint select = 
+        let tape = d.[select]
+        for i=tape.Count-1 downto 0 do 
+            match tape.[i] with
+            | :? Df as x -> x.r.A := 0.0f
+            | :? DM as x -> x.r.A.contents.setZero()
+            | _ -> failwith "Type not supported"
+    /// Disposes all the elements of the current tape and then clears it.
+    member t.Dispose select =
+        let tape = d.[select]
+        for i=0 to tape.Count-1 do 
+            match tape.[i] with
+            | :? Df as x -> ()
+            | :? DM as x -> x.r.Dispose()
+            | _ -> failwith "Type not supported"
+        tape.Clear()
+    /// Disposes all the elements of all the tapes and then clears them.
+    member t.DisposeAll() =
+        for tape in d.Values do
+            for i=0 to tape.Count-1 do 
+                match tape.[i] with
+                | :? Df as x -> ()
+                | :? DM as x -> x.r.Dispose()
+                | _ -> failwith "Type not supported"
+            tape.Clear()
+
+let tape = tapeType()
+
+let hadamaradMultiplicationModule = new DeviceBinaryTransformModule "x*y;"
+let hadamaradMultiplicationErrorModule = new DeviceTrinaryTransformModule "x*y+z;"
+let hadmult (a: DM) (b: DM) =
+    let va = a.r.P
+    let vb = b.r.P
+    let el = a.r.A
+    let er = b.r.A
+
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr, nc = (!va).rc
+        node.Resize nr nc
+        hadamaradMultiplicationModule.A(!va, !vb, !c)
+    let fb () = 
+        hadamaradMultiplicationErrorModule.A(!vb,!error,!el,!el)
+        hadamaradMultiplicationErrorModule.A(!va,!error,!er,!er)
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
 
 
+/// This is an optimization of the linear layer because the best optimization is to remove operations entirely.
+/// Doing it standardly involves too many unnecessary allocations.
+/// Can be used for both matrix-matrix standards and Hadamarad multiplications, but it is not intended that they be used at the same time.
+/// It might be good to split this function for that reason.
+let linear_layer (mm: (DM*DM) []) (hads: (DM*DM) []) (bias: DM option) =
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+
+    let ff() =
+        if mm.Length > 0 then 
+            let l,r = mm.[0]
+            let nr = (!l.r.P).num_rows
+            let nc = (!r.r.P).num_cols
+            node.Resize nr nc
+        else if hads.Length > 0 then
+            let l,r = hads.[0]
+            let nr,nc = (!l.r.P).rc
+            node.Resize nr nc
+        else failwith "Invalid input into linear_layer."
+
+        match bias with
+        | Some bias -> broadcastAdd2 0.0f !c 1.0f !bias.r.P
+        | None -> (!c).setZero()
+                
+        for l,r in mm do gemm2 nT nT 1.0f !l.r.P !r.r.P 1.0f !c
+        for l,r in hads do hadamaradMultiplicationErrorModule.A(!l.r.P, !r.r.P, !c, !c)
+
+    let fb() =
+        for l,r in mm do
+            if l.r.is_constant = false then gemm2 nT T 1.0f !error !r.r.P 1.0f !l.r.A
+            if r.r.is_constant = false then gemm2 T nT 1.0f !l.r.P !error 1.0f !r.r.A
+        for l,r in hads do 
+            hadamaradMultiplicationErrorModule.A(!error, !r.r.P, !l.r.A, !l.r.A)
+            hadamaradMultiplicationErrorModule.A(!l.r.P, !error, !r.r.A, !r.r.A)
+        
+        match bias with
+        | Some bias -> rowSum2 1.0f !error 1.0f !bias.r.A
+        | None -> ()
+    let ar =
+        [|
+        for l,r in mm do yield box l; yield box r
+        for l,r in hads do yield box l; yield box r
+        match bias with
+        | Some bias -> yield box bias 
+        | None -> () |]
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+    
+
+let matmult (a: DM) (b:DM) =
+    let va = a.r.P
+    let vb = b.r.P
+    let el = a.r.A
+    let er = b.r.A
+
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+        
+    let ff () = 
+        let nr = (!va).num_rows
+        let nc = (!vb).num_cols
+        node.Resize nr nc
+        gemm2 nT nT 1.0f !va !vb 0.0f !c
+    let fb () = 
+        if a.r.is_constant = false then gemm2 nT T 1.0f !error !vb 1.0f !el// The derivative with respect to the left. So the above argument gets inserted from the right left. Usually error * input.
+        if b.r.is_constant = false then gemm2 T nT 1.0f !va !error 1.0f !er// The derivative with respect to the right. So the above argument gets inserted from the right side. Usually weights * error.
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+    
+
+/// Addition with broadcasting.
+let addb (a: DM) (b: DM) = // b is for bias and a is for preactivations.
+    let va = a.r.P
+    let vb = b.r.P
+    let el = a.r.A
+    let er = b.r.A
+
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (!va).rc
+        node.Resize nr nc
+        geam2 nT nT 1.0f !va 0.0f !c !c
+        broadcastAdd2 1.0f !c 1.0f !vb
+    let fb () = 
+        geam2 nT nT 1.0f !el 1.0f !error !el
+        rowSum2 1.0f !error 1.0f !er
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+    
+
+let sigmoidModule = new DeviceUnaryTransformModule "1.0f/(1.0f+expf(-x));"
+//y = error
+//z = previous adjoint value
+let sigmoidErrorModule = new DeviceTrinaryTransformModule "x*(1.0f-x)*y + z;"
+let sigmoid (a:DM) =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (!va).rc
+        node.Resize nr nc
+        sigmoidModule.A(!va,!c)
+    let fb () = sigmoidErrorModule.A(!c,!error,!el,!el)
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+    
+
+let tanhModule = new DeviceUnaryTransformModule "tanhf(x);"
+//y = error
+//z = previous adjoint value
+let tanhErrorModule = new DeviceTrinaryTransformModule "(1.0f-x*x)*y + z;"
+let tanh_ (a:DM) =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (!va).rc
+        node.Resize nr nc
+        tanhModule.A(!va,!c)
+    let fb () = tanhErrorModule.A(!c,!error,!el,!el)
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+    
+
+let add alpha (a: DM) beta (b: DM) =
+    let va = a.r.P
+    let vb = b.r.P
+    let el = a.r.A
+    let er = b.r.A
+
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (!va).rc
+        node.Resize nr nc
+        geam2 nT nT alpha !va beta !vb !c
+    let fb () = 
+        let nr,nc = (!va).rc
+        if (a.r.is_constant) = false then geam2 nT nT alpha !error 1.0f !el !el
+        if (b.r.is_constant) = false then geam2 nT nT 1.0f !er beta !error !er
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+(*
+/// The old inneficient linear layer that just does everything as a sequence of matrix multiplication operation. For debugging purposes.
+let linear_layer_ (mm: (RDM*RDM) []) (hh: (RDM*RDM) []) (bias: RDM option) =
+    let mats = [|for l,r in mm do yield matmult l r|]
+    let hads = [|for l,r in hh do yield hadmult l r|]
+    let t = [|mats;hads|] |> Array.concat
+    let sum = Array.fold (fun state x -> add 1.0f state 1.0f x) t.[0] t.[1..]
+    match bias with
+    | Some bias -> addb sum bias
+    | None -> sum
+*)
+
+let squareModule = new DeviceUnaryTransformModule "x*x;"
+//y = error
+//z = previous adjoint value
+let squareErrorModule = new DeviceTrinaryTransformModule "2.0f*x*y + z;"
+let square (a:DM) =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (!va).rc
+        node.Resize nr nc
+        squareModule.A(!va,!c)
+    let fb () = squareErrorModule.A(!va,!error,!el,!el)
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+let sumModule = new DeviceUnaryMapSumModule "x;"
+let sumErrorModule = new DeviceUnaryCoefTransformModule "coef_x + x;" 
+let sum (a:DM) =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = Df_rec.create (ref 0.0f)
+    let error = node.A
+    
+    let ff () = node.P := sumModule.A(!va)
+    let fb () = sumErrorModule.A(!error,!el,!el)
+    let t = Df.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+let scale (alpha: floatType) (a:Df) =
+    let node = Df_rec.create (ref 0.0f)
+
+    let ff () = node.P := alpha * !a.r.P
+    let fb () = a.r.A := alpha * !node.A + !a.r.A
+    let t = Df.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+let sum_scalars (a:Df[]) =
+    let node = Df_rec.create (ref 0.0f)
+
+    let ff () = 
+        let c = ref 0.0f
+        for l in a do c := !c + !l.r.P
+        node.P := !c
+    let fb () = 
+        for l in a do l.r.A := !node.A + !l.r.A
+    let t = Df.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+let logModule = new DeviceUnaryTransformModule "logf(x);"
+//y=error
+//z=previous adjoint
+let logErrorModule = new DeviceTrinaryTransformModule "y / x + z;"
+let log_ (a:DM) =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (!va).rc
+        node.Resize nr nc
+        logModule.A(!va,!c)
+    let fb () = logErrorModule.A(!va,!error, !el, !el)
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+//coef_x = scalar
+//coef_y = coef
+let scalarMatrixAddModule = new DeviceBinaryCoefTransformModule "coef_x + coef_y*x;"
+let scalar_matrix_add scalar coef (a:DM) =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (!va).rc
+        node.Resize nr nc
+        scalarMatrixAddModule.A(scalar,!va,coef,!va,!c)
+    let fb () = geam2 nT nT coef !error 1.0f !el !el
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+//coef_x=scalar
+let scalarAddModule = new DeviceUnaryCoefTransformModule "coef_x + x;"
+let scalar_add (a:DM) b =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (!va).rc
+        node.Resize nr nc
+        scalarAddModule.A(b,!va,!c)
+    let fb () = geam2 nT nT 1.0f !error 1.0f !el !el
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+let neg (a:DM) =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = DM_rec.createEmpty
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (!va).rc
+        node.Resize nr nc
+        geam2 nT nT -1.0f !va 0.0f !va !c
+    let fb () = geam2 nT nT -1.0f !error 1.0f !el !el
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+let cross_entropy_cost target activations =
+    let cross_ent = linear_layer [||] [|target,log_ activations;scalar_matrix_add 1.0f -1.0f target, log_ (scalar_matrix_add 1.0f -1.0f activations)|] None
+    let s = sum cross_ent
+    scale (-1.0f/floatType (!target.r.P).num_cols) s
+
+let squared_error_cost target activations =
+    let r1 = add 1.0f target -1.0f activations
+    let r2 = square r1
+    let r3 = sum r2
+    scale (0.5f/floatType (!target.r.P).num_cols) r3
+
+// A recurrent layer of neurons
+type Layer =
+    {
+    W:DM  // Input weight matrix
+    U:DM  // Recurrent weight matrix
+    b:DM  // Bias vector
+    a:DM->DM
+    } with     // Activation function
+     
+    member l.ToArray = 
+        [|l.W;l.U;l.b|]
+
+    static member fromArray (a : DM[]) act =
+        {
+         W = a.[0]
+         U = a.[1]
+         b = a.[2]
+         a = act
+        }
+
+    static member createRandomLayer hidden_size input_size act =
+        {
+         W = DM.makeUniformRandomNode(hidden_size, input_size)
+         U = DM.makeUniformRandomNode(hidden_size, hidden_size)
+         b = DM.makeUniformRandomNode(hidden_size, 1)
+         a = act
+        } 
+
+    // For the section with no previous hidden state.
+    member l.runLayerNoH (x:DM) =
+        linear_layer [|l.W,x|] [||] (Some l.b) |> l.a
+    
+    // For the section with no input
+    member l.runLayerNoI (y:DM) =
+        linear_layer [|l.U,y|] [||] (Some l.b) |> l.a
+
+    // For the section with previous hidden state
+    member l.runLayer (x:DM) (y:DM) =
+        linear_layer [|l.W,x;l.U,y|] [||] (Some l.b) |> l.a
+
+
+type GRULayer =
+    {W_u:DM  // Input weight matrix for the update gate
+     U_u:DM  // Recurrent weight matrix for the update gate
+     b_u:DM  // Bias vector for the update gate
+
+     W_r:DM  // Input weight matrix for the reset gate
+     U_r:DM  // Recurrent weight matrix for the reset gate
+     b_r:DM  // Bias vector for the reset gate
+
+     W_n:DM  // Input weight matrix for the potential new state
+     U_n:DM  // Recurrent weight matrix for the potential new state
+     b_n:DM  // Bias vector for the potential new state
+
+     a : DM -> DM
+     } with
+    
+    /// Returns all the weights in an array.
+    member l.ToArray =
+        [|l.W_u;l.U_u;l.b_u;l.W_r;l.U_r;l.b_r;l.W_n;l.U_n;l.b_n|]
+
+    static member createRandomGRULayer hidden_size input_size act =
+        {
+        W_u = DM.makeUniformRandomNode(hidden_size, input_size)
+        U_u = DM.makeUniformRandomNode(hidden_size, hidden_size)
+        b_u = DM.makeUniformRandomNode(hidden_size, 1)
+
+        W_r = DM.makeUniformRandomNode(hidden_size, input_size)
+        U_r = DM.makeUniformRandomNode(hidden_size, hidden_size)
+        b_r = DM.makeUniformRandomNode(hidden_size, 1)
+
+        W_n = DM.makeUniformRandomNode(hidden_size, input_size)
+        U_n = DM.makeUniformRandomNode(hidden_size, hidden_size)
+        b_n = DM.makeUniformRandomNode(hidden_size, 1)
+
+        a = act
+        }
+
+    // For the section with no previous hidden state.
+    member l.runLayerNoH (x:DM) =
+        let update_gate = linear_layer [|l.W_u,x|] [||] (Some l.b_u) |> sigmoid
+        let potential_new_state = linear_layer [|l.W_n,x|] [||] (Some l.b_n) |> l.a
+        let output_b = hadmult (scalar_matrix_add 1.0f -1.0f update_gate) potential_new_state
+        output_b
+    
+    // For the section with no input
+    member l.runLayerNoI (y:DM) =
+        let update_gate = linear_layer [|l.U_u,y|] [||] (Some l.b_u) |> sigmoid
+        let reset_gate = linear_layer [|l.U_r,y|] [||] (Some l.b_r) |> sigmoid
+        let potential_new_state = linear_layer [|l.U_n, (hadmult reset_gate y)|] [||] (Some l.b_n) |> l.a
+        linear_layer [||] [|update_gate,y;(scalar_matrix_add 1.0f -1.0f update_gate),potential_new_state|] None
+
+    // For the section with previous hidden state
+    member l.runLayer (x:DM) (y:DM) =
+        let update_gate = linear_layer [|l.W_u,x;l.U_u,y|] [||] (Some l.b_u) |> sigmoid
+        let reset_gate = linear_layer [|l.W_r,x;l.U_r,y|] [||] (Some l.b_r) |> sigmoid
+        let potential_new_state = linear_layer [|l.W_n,x;l.U_n, (hadmult reset_gate y)|] [||] (Some l.b_n) |> l.a
+        linear_layer [||] [|update_gate,y;(scalar_matrix_add 1.0f -1.0f update_gate),potential_new_state|] None
+
+let add_gradients_to_weights (base_nodes: DM[]) learning_rate clip_coef = 
+    for x in base_nodes do 
+        gradclipModule.A(clip_coef,!x.r.A,!x.r.A)
+        geam2 nT nT 1.0f !x.r.P -learning_rate !x.r.A !x.r.P
+
+let nesterov_add_gradients (base_nodes: DM[]) (momentum_matrices: dMatrix[]) (copy_weights: dMatrix[]) learning_rate momentum_rate clip_coef = 
+    for i=0 to base_nodes.Length-1 do
+        let x = base_nodes.[i] 
+        let m = momentum_matrices.[i]
+        let c = copy_weights.[i]
+        gradclipModule.A(clip_coef,!x.r.A,!x.r.A)
+        geam2 nT nT -learning_rate !x.r.A momentum_rate m m // Add the gradients to the momentum matrices
+        geam2 nT nT 1.0f m 1.0f c c // Add momentum to the copy matrix
+        geam2 nT nT 1.0f c momentum_rate m !x.r.P // Apply Nesterov's momentum to the weights. It is really the copy weights that serve as the basis.
+
+let save_data filename (ar: DM []) =
+    let stream_data = File.OpenWrite(filename)
+    let writer_data = new BinaryWriter(stream_data)
+
+    // Magic number
+    writer_data.Write(929856)
+
+    writer_data.Write(ar.Length)
+    for x in ar do
+        writer_data.Write((!x.r.P).num_rows)
+        writer_data.Write((!x.r.P).num_cols)
+        let t = (!x.r.P).dArray.Gather()
+        for f in t do writer_data.Write(f)
+
+    writer_data.Close()
+    stream_data.Close()
+
+let load_data file_name is_constant =
+    let stream_data = File.OpenRead(file_name)
+    let reader_data = new BinaryReader(stream_data)
+
+    let m = reader_data.ReadInt32()
+    if m <> 929856 then failwith "Wrong file type in load_weights"
+
+    let l = reader_data.ReadInt32()
+    let weights = [|
+        for i=1 to l do
+            let num_rows = reader_data.ReadInt32()
+            let num_cols = reader_data.ReadInt32()
+            let ar = [|for x=1 to num_rows*num_cols do yield reader_data.ReadSingle()|]
+            match is_constant with
+            | true -> yield DM.makeConstantNode(num_rows,num_cols,ar)
+            | false -> yield DM.makeNode(num_rows,num_cols,ar)
+        |]
+
+    reader_data.Close()
+    stream_data.Close()
+    weights
+
+type LSTMLayer =
+    {W_z:DM  // Input weight matrix for the block input
+     U_z:DM  // Recurrent weight matrix for the block input
+     b_z:DM  // Bias vector for the block input
+
+     W_i:DM  // Input weight matrix for the input gate
+     U_i:DM  // Recurrent weight matrix for the input gate
+     b_i:DM  // Bias vector for the input gate
+     P_i:DM  // Peephole weight matrix for the input gate
+
+     W_f:DM  // Input weight matrix for the forget gate
+     U_f:DM  // Recurrent weight matrix for the forget gate
+     b_f:DM  // Bias vector for the forget gate
+     P_f:DM  // Peephole weight matrix for the forget gate
+
+     W_o:DM  // Input weight matrix for the output gate
+     U_o:DM  // Recurrent weight matrix for the output gate
+     b_o:DM  // Bias vector for the output gate
+     P_o:DM  // Peephole weight matrix for the output gate
+
+     block_input_a : DM -> DM
+     block_output_a : DM -> DM
+     } with
+    
+    /// Returns all the weights in an array.
+    member l.ToArray = [|l.W_z;l.U_z;l.b_z;l.W_i;l.U_i;l.b_i;l.P_i;l.W_f;l.U_f;l.b_f;l.P_f;l.W_o;l.U_o;l.b_o;l.P_o|]
+    static member fromArray (a: DM[]) block_input_a block_output_a =
+        {
+         W_z = a.[0]
+         U_z = a.[1]
+         b_z = a.[2]
+
+         W_i = a.[3]
+         U_i = a.[4]
+         b_i = a.[5]
+         P_i = a.[6]
+
+         W_f = a.[7]
+         U_f = a.[8]
+         b_f = a.[9]
+         P_f = a.[10]
+
+         W_o = a.[11]
+         U_o = a.[12]
+         b_o = a.[13]
+         P_o = a.[14]
+
+         block_input_a = block_input_a
+         block_output_a = block_output_a
+        }
+
+    static member createRandomLSTMLayer hidden_size input_size block_input_a block_output_a =
+        {
+        W_z = DM.makeUniformRandomNode(hidden_size, input_size)
+        U_z = DM.makeUniformRandomNode(hidden_size, hidden_size)
+        b_z = DM.makeUniformRandomNode(hidden_size, 1)
+
+        W_i = DM.makeUniformRandomNode(hidden_size, input_size)
+        U_i = DM.makeUniformRandomNode(hidden_size, hidden_size)
+        b_i = DM.makeUniformRandomNode(hidden_size, 1)
+        P_i = DM.makeUniformRandomNode(hidden_size, hidden_size)
+
+        W_f = DM.makeUniformRandomNode(hidden_size, input_size)
+        U_f = DM.makeUniformRandomNode(hidden_size, hidden_size)
+        b_f = DM.makeUniformRandomNode(hidden_size, 1)
+        P_f = DM.makeUniformRandomNode(hidden_size, hidden_size)
+
+        W_o = DM.makeUniformRandomNode(hidden_size, input_size)
+        U_o = DM.makeUniformRandomNode(hidden_size, hidden_size)
+        b_o = DM.makeUniformRandomNode(hidden_size, 1)
+        P_o = DM.makeUniformRandomNode(hidden_size, hidden_size)
+
+        block_input_a = block_input_a
+        block_output_a = block_output_a
+        }
+
+    member l.runLayer (x:DM) (y:DM) (c:DM) =
+        let block_input = linear_layer [|l.W_z,x;l.U_z,y|] [||] (Some l.b_z) |> l.block_input_a
+        let input_gate = linear_layer [|l.W_i,x;l.U_i,y;l.P_i,c|] [||] (Some l.b_i) |> sigmoid
+        let forget_gate = linear_layer [|l.W_f,x;l.U_f,y;l.P_f,c|] [||] (Some l.b_f) |> sigmoid
+        let c' = linear_layer [||] [|block_input,input_gate;c,forget_gate|] None
+        let output_gate = linear_layer [|l.W_o,x;l.U_o,y;l.P_o,c'|] [||] (Some l.b_o) |> sigmoid
+        hadmult (l.block_output_a c') output_gate, c'
+
+    member l.runLayerNoH (x:DM) =
+        let block_input = linear_layer [|l.W_z,x|] [||] (Some l.b_z) |> l.block_input_a
+        let input_gate = linear_layer [|l.W_i,x|] [||] (Some l.b_i) |> sigmoid
+        let forget_gate = linear_layer [|l.W_f,x|] [||] (Some l.b_f) |> sigmoid
+        let c' = hadmult block_input input_gate
+        let output_gate = linear_layer [|l.W_o,x;l.P_o,c'|] [||] (Some l.b_o) |> sigmoid
+        hadmult (l.block_output_a c') output_gate, c'
+
+    member l.runLayerNoI (y:DM) (c:DM) =
+        let block_input = linear_layer [|l.U_z,y|] [||] (Some l.b_z) |> l.block_input_a
+        let input_gate = linear_layer [|l.U_i,y;l.P_i,c|] [||] (Some l.b_i) |> sigmoid
+        let forget_gate = linear_layer [|l.U_f,y;l.P_f,c|] [||] (Some l.b_f) |> sigmoid
+        let c' = linear_layer [||] [|block_input,input_gate;c,forget_gate|] None
+        let output_gate = linear_layer [|l.U_o,y;l.P_o,c'|] [||] (Some l.b_o) |> sigmoid
+        hadmult (l.block_output_a c') output_gate, c'

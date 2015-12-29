@@ -67,18 +67,24 @@ let lstm_embedded_reber_train num_iters learning_rate (data: DM[]) (targets: DM[
         scale (1.0f/float32 (costs.Length-1)) (sum_scalars costs)
 
     let ts = (data.Length-1)
-    let vs = (data_v.Length-1)
-
-    let r = training_loop data targets ts
-    let rv = training_loop data_v targets_v vs
+    let vs = ts//(data_v.Length-1)
 
     let mutable r' = 0.0f
     let mutable i = 1
     while i <= num_iters && System.Single.IsNaN r' = false do
-        tape.forwardpropTape ts
-        printfn "The training cost is %f at iteration %i" !r.r.P i
+        
+        let rv = training_loop data_v targets_v vs
+        
         tape.forwardpropTape vs
         printfn "The validation cost is %f at iteration %i" !rv.r.P i
+        
+        tape.Clear vs
+
+        let r = training_loop data targets ts
+
+        tape.forwardpropTape ts
+        printfn "The training cost is %f at iteration %i" !r.r.P i
+        
         yield !r.r.P, !rv.r.P
 
         tape.resetTapeAdjoint -1 // Resets base adjoints
@@ -87,8 +93,8 @@ let lstm_embedded_reber_train num_iters learning_rate (data: DM[]) (targets: DM[
         tape.reversepropTape ts // Resets the adjoints for the test select
         add_gradients_to_weights base_nodes learning_rate clip_coef
 
-        //tape.Dispose ts
-        //tape.Dispose vs
+        tape.Clear ts
+        //tape.Clear vs
 
         i <- i+1
         r' <- !r.r.P

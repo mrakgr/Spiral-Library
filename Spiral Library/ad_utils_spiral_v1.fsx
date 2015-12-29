@@ -312,8 +312,7 @@ type DeviceUnaryTransformModule(op: string) =
 
     let kernel = ctx.LoadKernelPTX(k.GetPTX(),"Map1Kernel")
 
-    member t.A(x: CudaDeviceVariable<floatType>) =
-        let n = int x.Size
+    member t.A(x: CudaDeviceVariable<floatType>, n) =
         let o = new_dev<floatType> n
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
@@ -321,8 +320,7 @@ type DeviceUnaryTransformModule(op: string) =
         kernel.RunAsync(str.Stream, x.DevicePointer,o.DevicePointer,n) |> ignore
         o
 
-    member t.A(x: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>) =
-        let n = int o.Size
+    member t.A(x: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>, n) =
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
@@ -335,7 +333,7 @@ type DeviceUnaryTransformModule(op: string) =
 
     member t.A(x: dMatrix, o: dMatrix) =
         if x.rc <> o.rc then failwith "x.rc <> o.rc in DeviceUnaryTransformModule"
-        t.A(x.dArray,o.dArray)
+        t.A(x.dArray,o.dArray,x.num_rows*x.num_cols)
 
 /// o <- f(x,y)
 type DeviceBinaryTransformModule(op: string) = 
@@ -373,8 +371,7 @@ type DeviceBinaryTransformModule(op: string) =
 
     let kernel = ctx.LoadKernelPTX(k.GetPTX(),"Map2Kernel")
 
-    member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>) =
-        let n = int x.Size
+    member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>, n) =
         let o = new_dev<floatType> n
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
@@ -382,8 +379,7 @@ type DeviceBinaryTransformModule(op: string) =
         kernel.RunAsync(str.Stream, x.DevicePointer,y.DevicePointer,o.DevicePointer,n) |> ignore
         o
 
-    member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>) =
-        let n = int o.Size
+    member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>, n) =
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
@@ -397,7 +393,7 @@ type DeviceBinaryTransformModule(op: string) =
     member t.A(x: dMatrix, y: dMatrix, o: dMatrix) =
         if x.rc <> y.rc then failwith "x.rc <> y.rc in DeviceBinaryTransformModule"
         if y.rc <> o.rc then failwith "y.rc <> o.rc in DeviceBinaryTransformModule"
-        t.A(x.dArray,y.dArray,o.dArray)
+        t.A(x.dArray,y.dArray,o.dArray,x.num_rows*x.num_cols)
 
 /// o <- f(x,y,z)
 type DeviceTrinaryTransformModule(op: string) = 
@@ -435,8 +431,7 @@ type DeviceTrinaryTransformModule(op: string) =
 
     let kernel = ctx.LoadKernelPTX(k.GetPTX(),"Map3Kernel")
 
-    member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>, z: CudaDeviceVariable<floatType>) =
-        let n = int x.Size
+    member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>, z: CudaDeviceVariable<floatType>, n) =
         let o = new_dev<floatType> n
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
@@ -444,8 +439,7 @@ type DeviceTrinaryTransformModule(op: string) =
         kernel.RunAsync(str.Stream, x.DevicePointer,y.DevicePointer,z.DevicePointer,o.DevicePointer,n) |> ignore
         o
 
-    member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>, z: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>) =
-        let n = int o.Size
+    member t.A(x: CudaDeviceVariable<floatType>, y: CudaDeviceVariable<floatType>, z: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>,n) =
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
@@ -460,7 +454,7 @@ type DeviceTrinaryTransformModule(op: string) =
         if x.rc <> y.rc then failwith "x.rc <> y.rc in DeviceTrinaryTransformModule"
         if y.rc <> z.rc then failwith "y.rc <> z.rc in DeviceTrinaryTransformModule"
         if z.rc <> o.rc then failwith "z.rc <> o.rc in DeviceTrinaryTransformModule"
-        t.A(x.dArray,y.dArray,z.dArray,o.dArray)
+        t.A(x.dArray,y.dArray,z.dArray,o.dArray,x.num_rows*x.num_cols)
 
 /// o <- sum(f(x))
 type DeviceUnaryMapSumModule(op: string) = 
@@ -510,8 +504,7 @@ type DeviceUnaryMapSumModule(op: string) =
 
     let kernel = ctx.LoadKernelPTX(k.GetPTX(),"MapSumKernel")
 
-    member t.A(x: CudaDeviceVariable<floatType>) =
-        let n = int x.Size
+    member t.A(x: CudaDeviceVariable<floatType>, n) =
         use o = new_dev<floatType> 1
         o.Memset(0u)
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
@@ -521,7 +514,7 @@ type DeviceUnaryMapSumModule(op: string) =
         o.[SizeT 0]
 
     member t.A(x: dMatrix) =
-        t.A(x.dArray)
+        t.A(x.dArray, x.num_rows*x.num_cols)
 
 /// o <- sum(f(x,y))
 type DeviceBinaryMapSumModule(op: string) = 
@@ -571,8 +564,7 @@ type DeviceBinaryMapSumModule(op: string) =
 
     let kernel = ctx.LoadKernelPTX(k.GetPTX(),"Map2SumKernel")
 
-    member t.A(x: CudaDeviceVariable<floatType>,y: CudaDeviceVariable<floatType>) =
-        let n = int x.Size
+    member t.A(x: CudaDeviceVariable<floatType>,y: CudaDeviceVariable<floatType>,n) =
         use o = new_dev<floatType> 1
         o.Memset(0u)
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
@@ -583,7 +575,7 @@ type DeviceBinaryMapSumModule(op: string) =
 
     member t.A(x: dMatrix,y: dMatrix) =
         if x.rc <> y.rc then failwith "x.rc <> y.rc in DeviceBinaryMapSumModule"
-        t.A(x.dArray,y.dArray)
+        t.A(x.dArray,y.dArray,x.num_rows*x.num_cols)
 
 /// o <- f(coef_x,x)
 type DeviceUnaryCoefTransformModule(op: string) = 
@@ -621,8 +613,7 @@ type DeviceUnaryCoefTransformModule(op: string) =
 
     let kernel = ctx.LoadKernelPTX(k.GetPTX(),"MapCoefKernel")
 
-    member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>) =
-        let n = int x.Size
+    member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>,n) =
         let o = new_dev<floatType> n
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
@@ -630,8 +621,7 @@ type DeviceUnaryCoefTransformModule(op: string) =
         kernel.RunAsync(str.Stream, coef_x,x.DevicePointer,o.DevicePointer,n) |> ignore
         o
 
-    member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>) =
-        let n = int o.Size
+    member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>,n) =
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
@@ -644,7 +634,7 @@ type DeviceUnaryCoefTransformModule(op: string) =
 
     member t.A(coef_x, x: dMatrix, o: dMatrix) =
         if x.rc <> o.rc then failwith "x.rc <> o.rc in DeviceUnaryCoefTransformModule"
-        t.A(coef_x,x.dArray,o.dArray)
+        t.A(coef_x,x.dArray,o.dArray,x.num_rows*x.num_cols)
 
 /// o <- f(coef_x,x,coef_y,y)
 type DeviceBinaryCoefTransformModule(op: string) = 
@@ -682,8 +672,7 @@ type DeviceBinaryCoefTransformModule(op: string) =
 
     let kernel = ctx.LoadKernelPTX(k.GetPTX(),"MapCoef2Kernel")
 
-    member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>,coef_y: floatType, y: CudaDeviceVariable<floatType>) =
-        let n = int x.Size
+    member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>,coef_y: floatType, y: CudaDeviceVariable<floatType>,n) =
         let o = new_dev<floatType> n
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
@@ -691,8 +680,7 @@ type DeviceBinaryCoefTransformModule(op: string) =
         kernel.RunAsync(str.Stream, coef_x,x.DevicePointer,coef_y, y.DevicePointer,o.DevicePointer,n) |> ignore
         o
 
-    member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>, coef_y: floatType, y: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>) =
-        let n = int o.Size
+    member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>, coef_y: floatType, y: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>,n) =
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
@@ -706,7 +694,7 @@ type DeviceBinaryCoefTransformModule(op: string) =
     member t.A(coef_x, x: dMatrix, coef_y, y: dMatrix, o: dMatrix) =
         if x.rc <> y.rc then failwith "x.rc <> y.rc in DeviceBinaryCoefTransformModule"
         if y.rc <> o.rc then failwith "y.rc <> o.rc in DeviceBinaryCoefTransformModule"
-        t.A(coef_x,x.dArray,coef_y,y.dArray,o.dArray)
+        t.A(coef_x,x.dArray,coef_y,y.dArray,o.dArray,x.num_rows*x.num_cols)
 
 // The gradient clipping module.
 let gradclipModule = DeviceUnaryCoefTransformModule "(x < -coef_x) ? -coef_x : (x > coef_x ? coef_x : x);"
@@ -725,7 +713,7 @@ type dMatrix with
         cudaRandom.GenerateUniform(cudaBuffer)
 
         // 2.0f*scaling_factor ensures that it is rescaled around zero if the scaling_factor is 1.0f.
-        randMapModule.A(2.0f*scaling_factor,cudaBuffer,location,cudaBuffer,cudaBuffer)
+        randMapModule.A(2.0f*scaling_factor,cudaBuffer,location,cudaBuffer,cudaBuffer,weights_total_size)
 
         dMatrix.create(weights_num_rows,weights_num_cols,cudaBuffer)
 
@@ -735,7 +723,7 @@ type dMatrix with
 
         cudaRandom.GenerateUniform(t.dArray)
         // 2.0f*scaling_factor ensures that it is rescaled around zero if the scaling_factor is 1.0f.
-        randMapModule.A(2.0f*scaling_factor,t.dArray,location,t.dArray,t.dArray)
+        randMapModule.A(2.0f*scaling_factor,t,location,t,t)
 
 type DeviceGetSliceModule() = 
     let block_size = 256
@@ -1030,17 +1018,18 @@ and DM =
 
 open System.Collections.Generic
 type tapeType() =
-    let d = Dictionary<int,List<obj>>()
+    let d = Dictionary<int,List<obj>*(List<DM_rec>*int ref)>()
     let mutable select = 0
     /// Instantiates a new List if none is present at the selection and adds to it, else it just adds to the selected one.
     /// The default select is 0.
     member t.Add a =
         if d.ContainsKey(select) = false then
-            let tape = List<obj>()
-            d.Add(select,tape)
+            let tape = List()
+            let memory_dm = List(), ref 0
+            d.Add(select, (tape, memory_dm))
             tape.Add(a)
         else
-            let tape = d.[select]
+            let tape,_ = d.[select]
             tape.Add(a)
 
     /// Sets the select to input.
@@ -1048,7 +1037,7 @@ type tapeType() =
 
     /// Runs all the forward functions in the currently selected tape.
     member t.forwardpropTape select = 
-        let tape = d.[select]
+        let tape,_ = d.[select]
         for i=0 to tape.Count-1 do 
             match tape.[i] with
             | :? Df as x -> x.ff()
@@ -1056,7 +1045,7 @@ type tapeType() =
             | _ -> failwith "Type not supported"
     /// Runs all the backward functions in the currently selected tape, starting from the top.
     member t.reversepropTape select = 
-        let tape = d.[select]
+        let tape,_ = d.[select]
         for i=tape.Count-1 downto 0 do 
             match tape.[i] with
             | :? Df as x -> x.fb()
@@ -1064,30 +1053,77 @@ type tapeType() =
             | _ -> failwith "Type not supported"
     /// Resets the adjoints of the selected tape.
     member t.resetTapeAdjoint select = 
-        let tape = d.[select]
+        let tape,_ = d.[select]
         for i=tape.Count-1 downto 0 do 
             match tape.[i] with
             | :? Df as x -> x.r.A := 0.0f
             | :? DM as x -> x.r.A.contents.setZero()
             | _ -> failwith "Type not supported"
-    /// Disposes all the elements of the current tape and then clears it.
+    /// Resets the adjoints of the selected tape.
+    member t.resetTapePrimal select = 
+        if d.ContainsKey(select) then
+            let tape,_ = d.[select]
+            for i=tape.Count-1 downto 0 do 
+                match tape.[i] with
+                | :? Df as x -> x.r.P := 0.0f
+                | :? DM as x -> x.r.P.contents.setZero()
+                | _ -> failwith "Type not supported"
+    /// Disposes all the elements of the select tape and then clears it including the memory buffer.
     member t.Dispose select =
-        let tape = d.[select]
-        for i=0 to tape.Count-1 do 
-            match tape.[i] with
+        let tape,mp = d.[select]
+        let memory,dm_pointer = mp
+        for x in tape do 
+            match x with
             | :? Df as x -> ()
             | :? DM as x -> x.r.Dispose()
             | _ -> failwith "Type not supported"
+        for x in memory do x.Dispose()
         tape.Clear()
-    /// Disposes all the elements of all the tapes and then clears them.
+        memory.Clear()
+        dm_pointer := 0
+    /// Clears the select tape without disposing it or the memory buffer.
+    /// Also sets the pointer to zero for the select.
+    member t.Clear select =
+        if d.ContainsKey(select) then
+            let tape,mp = d.[select]
+            let memory,dm_pointer = mp
+            tape.Clear()
+            dm_pointer := 0
+    /// Disposes all the elements of all the tapes and then clears them including the memory buffer.
     member t.DisposeAll() =
-        for tape in d.Values do
-            for i=0 to tape.Count-1 do 
-                match tape.[i] with
+        for tape,mp in d.Values do
+            let memory,dm_pointer = mp
+            for x in tape do 
+                match x with
                 | :? Df as x -> ()
                 | :? DM as x -> x.r.Dispose()
                 | _ -> failwith "Type not supported"
+            for x in memory do x.Dispose()
             tape.Clear()
+            memory.Clear()
+            dm_pointer := 0
+    /// Returns an empty DM_rec if none exists at the pointer and adds it to the memory buffer, else it returns the DM_rec at the pointer to be reused.
+    /// Increments the pointer afterwards.
+    member t.GetDMIf =
+        if d.ContainsKey(select) then
+            let _, mp = d.[select]
+            let memory,dm_pointer = mp
+            if memory.Count > !dm_pointer then
+                dm_pointer := !dm_pointer+1
+                memory.[!dm_pointer-1]
+            else
+                dm_pointer := !dm_pointer+1
+                let t = DM_rec.createEmpty
+                memory.Add(t)
+                t
+        else
+            let tape = List()
+            let memory = List()
+            let dm_pointer = ref 1
+            d.Add(select, (tape, (memory,dm_pointer)))
+            let t = DM_rec.createEmpty
+            memory.Add(t)
+            t
 
 let tape = tapeType()
 
@@ -1099,7 +1135,7 @@ let hadmult (a: DM) (b: DM) =
     let el = a.r.A
     let er = b.r.A
 
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
 
@@ -1120,7 +1156,7 @@ let hadmult (a: DM) (b: DM) =
 /// Can be used for both matrix-matrix standards and Hadamarad multiplications, but it is not intended that they be used at the same time.
 /// It might be good to split this function for that reason.
 let linear_layer (mm: (DM*DM) []) (hads: (DM*DM) []) (bias: DM option) =
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
 
@@ -1172,7 +1208,7 @@ let matmult (a: DM) (b:DM) =
     let el = a.r.A
     let er = b.r.A
 
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
         
@@ -1196,7 +1232,7 @@ let addb (a: DM) (b: DM) = // b is for bias and a is for preactivations.
     let el = a.r.A
     let er = b.r.A
 
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
 
@@ -1221,7 +1257,7 @@ let sigmoid (a:DM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
 
@@ -1243,7 +1279,7 @@ let tanh_ (a:DM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
 
@@ -1263,7 +1299,7 @@ let add alpha (a: DM) beta (b: DM) =
     let el = a.r.A
     let er = b.r.A
 
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
 
@@ -1299,7 +1335,7 @@ let square (a:DM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
 
@@ -1357,7 +1393,7 @@ let log_ (a:DM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
 
@@ -1377,7 +1413,7 @@ let scalar_matrix_add scalar coef (a:DM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
 
@@ -1396,7 +1432,7 @@ let scalar_add (a:DM) b =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
 
@@ -1413,7 +1449,7 @@ let neg (a:DM) =
     let va = a.r.P
     let el = a.r.A
 
-    let node = DM_rec.createEmpty
+    let node = tape.GetDMIf
     let c = node.P
     let error = node.A
 

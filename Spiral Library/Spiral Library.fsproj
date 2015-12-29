@@ -60,7 +60,8 @@
     <None Include="reber_grammar_test.fsx" />
     <None Include="spiral_old.fsx" />
     <None Include="load_mnist.fsx" />
-    <None Include="embedded_gramar_branch.fsx" />
+    <None Include="dump_branching.fsx" />
+    <None Include="dump2.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="CudaBlas">

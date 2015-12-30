@@ -2,8 +2,6 @@
 
 #load "ad_utils_spiral_v1.fsx"
 open Ad_utils_spiral_v1
-//#load "spiral_old.fsx"
-//open Spiral_old
 
 #r "../packages/FSharp.Charting.0.90.13/lib/net40/FSharp.Charting.dll"
 #r "System.Windows.Forms.DataVisualization.dll"
@@ -90,7 +88,7 @@ let lstm_embedded_reber_train num_iters learning_rate (data: DM[]) (targets: DM[
         tape.resetTapeAdjoint -1 // Resets base adjoints
         tape.resetTapeAdjoint ts // Resets the adjoints for the training select
         r.r.A := 1.0f
-        tape.reversepropTape ts // Resets the adjoints for the test select
+        tape.reversepropTape ts // Runs the reverse step.
         add_gradients_to_weights base_nodes learning_rate clip_coef
 
         tape.Clear ts

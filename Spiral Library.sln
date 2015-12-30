@@ -16,6 +16,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tutorial Examples", "Tutori
 		Tutorial examples\post4.fsx = Tutorial examples\post4.fsx
 		Tutorial examples\post5.fsx = Tutorial examples\post5.fsx
 		Tutorial examples\post6.fsx = Tutorial examples\post6.fsx
+		Tutorial examples\post7.fsx = Tutorial examples\post7.fsx
 	EndProjectSection
 EndProject
 Global

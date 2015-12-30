@@ -28,7 +28,7 @@ let numSm = ctx.GetDeviceInfo().MultiProcessorCount // The number of streaming m
 // Make a stream class.
 let str = new CudaStream()
 // Set the Cuda libraries handles to the above stream.
-let cublas = CudaBlas(str.Stream)
+let cublas = CudaBlas(str.Stream,PointerMode.Host,AtomicsMode.Allowed) // Better performance for some solver functions with atomics allowed.
 let cudnn = new CudaDNN.CudaDNNContext()
 cudnn.SetStream(str)
 let cudaRandom = new CudaRand.CudaRandDevice(GeneratorType.PseudoDefault)
@@ -1010,6 +1010,8 @@ and DM =
     static member makeConstantNode(hidden_size, input_size, input: floatType[]) =
         let p = dMatrix.create(hidden_size,input_size, input)
         {r=DM_rec.createConstant p;ff=Noop;fb=Noop}
+    static member makeConstantNode p =
+        {r=DM_rec.createConstant p;ff=Noop;fb=Noop}
 
     static member makeUniformRandomNode(hidden_size,input_size) =
         let scale = (1.0f / sqrt(hidden_size+input_size |> floatType))
@@ -1144,8 +1146,8 @@ let hadmult (a: DM) (b: DM) =
         node.Resize nr nc
         hadamaradMultiplicationModule.A(!va, !vb, !c)
     let fb () = 
-        hadamaradMultiplicationErrorModule.A(!vb,!error,!el,!el)
-        hadamaradMultiplicationErrorModule.A(!va,!error,!er,!er)
+        if a.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!vb,!error,!el,!el)
+        if b.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!va,!error,!er,!er)
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
@@ -1154,7 +1156,7 @@ let hadmult (a: DM) (b: DM) =
 /// This is an optimization of the linear layer because the best optimization is to remove operations entirely.
 /// Doing it standardly involves too many unnecessary allocations.
 /// Can be used for both matrix-matrix standards and Hadamarad multiplications, but it is not intended that they be used at the same time.
-/// It might be good to split this function for that reason.
+/// Has been split into two function below.
 let linear_layer (mm: (DM*DM) []) (hads: (DM*DM) []) (bias: DM option) =
     let node = tape.GetDMIf
     let c = node.P
@@ -1177,26 +1179,67 @@ let linear_layer (mm: (DM*DM) []) (hads: (DM*DM) []) (bias: DM option) =
         | None -> (!c).setZero()
                 
         for l,r in mm do gemm2 nT nT 1.0f !l.r.P !r.r.P 1.0f !c
-        for l,r in hads do hadamaradMultiplicationErrorModule.A(!l.r.P, !r.r.P, !c, !c)
+        for l,r in hads do hadamaradMultiplicationErrorModule.A(!l.r.P, !r.r.P, !c, !c) //c = l.*r+c
 
     let fb() =
         for l,r in mm do
             if l.r.is_constant = false then gemm2 nT T 1.0f !error !r.r.P 1.0f !l.r.A
             if r.r.is_constant = false then gemm2 T nT 1.0f !l.r.P !error 1.0f !r.r.A
         for l,r in hads do 
-            hadamaradMultiplicationErrorModule.A(!error, !r.r.P, !l.r.A, !l.r.A)
-            hadamaradMultiplicationErrorModule.A(!l.r.P, !error, !r.r.A, !r.r.A)
+            if l.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!error, !r.r.P, !l.r.A, !l.r.A)
+            if r.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!l.r.P, !error, !r.r.A, !r.r.A)
         
         match bias with
         | Some bias -> rowSum2 1.0f !error 1.0f !bias.r.A
         | None -> ()
-    let ar =
-        [|
-        for l,r in mm do yield box l; yield box r
-        for l,r in hads do yield box l; yield box r
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+let linear_layer_matmult (mm: (DM*DM) []) (bias: DM option) =
+    let node = tape.GetDMIf
+    let c = node.P
+    let error = node.A
+
+    let ff() =
+        let l,r = mm.[0]
+        let nr = (!l.r.P).num_rows
+        let nc = (!r.r.P).num_cols
+        node.Resize nr nc
+
+        gemm2 nT nT 1.0f !l.r.P !r.r.P 0.0f !c
+        for l,r in mm.[1..] do gemm2 nT nT 1.0f !l.r.P !r.r.P 1.0f !c
+
         match bias with
-        | Some bias -> yield box bias 
-        | None -> () |]
+        | Some bias -> broadcastAdd2 1.0f !c 1.0f !bias.r.P
+        | None -> ()
+
+    let fb() =
+        for l,r in mm do
+            if l.r.is_constant = false then gemm2 nT T 1.0f !error !r.r.P 1.0f !l.r.A
+            if r.r.is_constant = false then gemm2 T nT 1.0f !l.r.P !error 1.0f !r.r.A
+        match bias with
+        | Some bias -> rowSum2 1.0f !error 1.0f !bias.r.A
+        | None -> ()
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+let linear_layer_hads (hads: (DM*DM) []) =
+    let node = tape.GetDMIf
+    let c = node.P
+    let error = node.A
+
+    let ff() =
+        let l,r = hads.[0]
+        let nr,nc = (!l.r.P).rc
+        node.Resize nr nc
+        hadamaradMultiplicationModule.A(!l.r.P,!r.r.P,!c)
+        for l,r in hads.[1..] do hadamaradMultiplicationErrorModule.A(!l.r.P, !r.r.P, !c, !c) //c = l.*r+c
+    let fb() =
+        for l,r in hads do 
+            if l.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!error, !r.r.P, !l.r.A, !l.r.A)
+            if r.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!l.r.P, !error, !r.r.A, !r.r.A)
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
@@ -1421,7 +1464,7 @@ let scalar_matrix_add scalar coef (a:DM) =
         let nr,nc = (!va).rc
         node.Resize nr nc
         scalarMatrixAddModule.A(scalar,!va,coef,!va,!c)
-    let fb () = geam2 nT nT coef !error 1.0f !el !el
+    let fb () = if a.r.is_constant = false then geam2 nT nT coef !error 1.0f !el !el
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
@@ -1457,7 +1500,7 @@ let neg (a:DM) =
         let nr,nc = (!va).rc
         node.Resize nr nc
         geam2 nT nT -1.0f !va 0.0f !va !c
-    let fb () = geam2 nT nT -1.0f !error 1.0f !el !el
+    let fb () = if a.r.is_constant = false then geam2 nT nT -1.0f !error 1.0f !el !el
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
@@ -1472,6 +1515,34 @@ let squared_error_cost target activations =
     let r2 = square r1
     let r3 = sum r2
     scale (0.5f/floatType (!target.r.P).num_cols) r3
+
+// A feedforward layer of neurons
+type FeedforwardLayer =
+    {
+    W:DM  // Input weight matrix
+    b:DM  // Bias vector
+    a:DM->DM
+    } with     // Activation function
+     
+    member l.ToArray = 
+        [|l.W;l.b|]
+
+    static member fromArray (a : DM[]) act =
+        {
+         W = a.[0]
+         b = a.[1]
+         a = act
+        }
+
+    static member createRandomLayer hidden_size input_size act =
+        {
+         W = DM.makeUniformRandomNode(hidden_size, input_size)
+         b = DM.makeUniformRandomNode(hidden_size, 1)
+         a = act
+        } 
+
+    member l.runLayer (x:DM) =
+        linear_layer_matmult [|l.W,x|] (Some l.b) |> l.a
 
 // A recurrent layer of neurons
 type Layer =
@@ -1575,6 +1646,10 @@ type GRULayer =
 let add_gradients_to_weights (base_nodes: DM[]) learning_rate clip_coef = 
     for x in base_nodes do 
         gradclipModule.A(clip_coef,!x.r.A,!x.r.A)
+        geam2 nT nT 1.0f !x.r.P -learning_rate !x.r.A !x.r.P
+
+let add_gradients_to_weights' (base_nodes: DM[]) learning_rate = 
+    for x in base_nodes do 
         geam2 nT nT 1.0f !x.r.P -learning_rate !x.r.A !x.r.P
 
 let nesterov_add_gradients (base_nodes: DM[]) (momentum_matrices: dMatrix[]) (copy_weights: dMatrix[]) learning_rate momentum_rate clip_coef = 

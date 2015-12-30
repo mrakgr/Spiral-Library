@@ -62,6 +62,7 @@
     <None Include="load_mnist.fsx" />
     <None Include="dump_branching.fsx" />
     <None Include="dump2.fsx" />
+    <None Include="batched_test.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="CudaBlas">

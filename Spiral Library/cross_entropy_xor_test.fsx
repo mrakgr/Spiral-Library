@@ -9,10 +9,15 @@ open Ad_utils_spiral_v1
 
 open FSharp.Charting
 
-let w1 = DM.makeNode(3,2,[|0.5f;0.4f;0.3f;0.2f;0.1f;0.0f|])
-let bias1 = DM.makeNode(3,1,[|0.5f;0.4f;0.3f|])
-let w2 = DM.makeNode(1,3,[|-0.55f;-0.4f;-0.25f|])
-let bias2 = DM.makeNode(1,1,[|-0.8f|])
+//let w1 = DM.makeNode(3,2,[|0.5f;0.4f;0.3f;0.2f;0.1f;0.0f|])
+//let bias1 = DM.makeNode(3,1,[|0.5f;0.4f;0.3f|])
+//let w2 = DM.makeNode(1,3,[|-0.55f;-0.4f;-0.25f|])
+//let bias2 = DM.makeNode(1,1,[|-0.8f|])
+
+let w1 = DM.makeUniformRandomNode(3, 2)
+let bias1 = DM.makeUniformRandomNode(3, 1)
+let w2 = DM.makeUniformRandomNode(1, 3)
+let bias2 = DM.makeUniformRandomNode(1, 1)
 
 let input = DM.makeConstantNode(2,4,[|0.0f;0.0f;0.0f;1.0f;1.0f;0.0f;1.0f;1.0f;|])
 let output = DM.makeConstantNode(1,4,[|0.0f;1.0f;1.0f;0.0f|])
@@ -23,7 +28,7 @@ let z1 = addb (matmult w1 input) bias1
 let a1 = tanh_ z1
 
 let z2 = addb (matmult w2 a1) bias2
-let a2 = sigmoid z2
+let a2 = steep_sigmoid 3.0f z2
 
 let target = output
 let activations = a2
@@ -57,12 +62,12 @@ let train =
         printfn "The cost is %f at iteration %i" !r.r.P i
 
         // Resets the adjoints to zero.
-        for x in base_nodes do x.r.A.contents.setZero()
+        for x in base_nodes do x.r.A.setZero()
         tape.resetTapeAdjoint 0
         r.r.A := 1.0f
         tape.reversepropTape 0
 
-        add_gradients_to_weights' base_nodes 1.0f
+        add_gradients_to_weights' base_nodes 0.5f
         yield !r.r.P
     |]
 

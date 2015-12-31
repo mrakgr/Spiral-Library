@@ -103,16 +103,18 @@ let d_training_data_validation, d_target_data_validation = make_data_from_set 30
 
 let hidden_size = 64
 
-let l1 = LSTMLayer.createRandomLSTMLayer hidden_size 7 tanh_ tanh_
+let l1 = LSTMLayer.createRandomLSTMLayer hidden_size 7 linear_tanh linear_tanh
 let l2 = Layer.createRandomLayer 7 hidden_size sigmoid
 
 // Add the base nodes to the tape for easier resetting and disposal.
 tape.Select -1
 let base_nodes = [|l1.ToArray;l2.ToArray|] |> Array.concat |> Array.iter (fun x -> tape.Add x)
 
+// This iteration is to warm up the library. It compiles all the lazy Cuda modules.
+lstm_embedded_reber_train 1 5.0f d_training_data_20 d_target_data_20 d_training_data_validation d_target_data_validation 1.0f l1 l2
 #time
 let s = [|
-        yield lstm_embedded_reber_train 100 5.0f d_training_data_20 d_target_data_20 d_training_data_validation d_target_data_validation 1.0f l1 l2
+        yield lstm_embedded_reber_train 499 1.0f d_training_data_20 d_target_data_20 d_training_data_validation d_target_data_validation 1.0f l1 l2
         |] |> Array.concat
 #time
 // On the GTX 970, I get 3-4s depending on how hot the GPU is.

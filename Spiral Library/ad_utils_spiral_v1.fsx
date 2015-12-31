@@ -479,7 +479,12 @@ type DeviceUnaryMapSumModule(op: string) =
 	            int i = blockDim.x * blockIdx.x + threadIdx.x;
 	            const int stride = blockDim.x * gridDim.x;
 	            __shared__ "+FloatTypeCpp+" temp[32];
-                if (threadIdx.x < 32) temp[threadIdx.x] = 0.0f; "+FloatTypeCpp+" acc = 0.0f;
+                if (threadIdx.x < 32) {
+                    temp[threadIdx.x] = 0.0f; 
+                    if (blockIdx.x == 0) O[0] = 0.0f;
+                    }
+                
+                    "+FloatTypeCpp+" acc = 0.0f;
 	            while (i < N)
 	            {
 		            acc += op(A[i]);
@@ -503,10 +508,9 @@ type DeviceUnaryMapSumModule(op: string) =
             reraise()
 
     let kernel = ctx.LoadKernelPTX(k.GetPTX(),"MapSumKernel")
+    let o = new_dev<floatType> 1
 
     member t.A(x: CudaDeviceVariable<floatType>, n) =
-        use o = new_dev<floatType> 1
-        o.Memset(0u)
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
@@ -539,7 +543,11 @@ type DeviceBinaryMapSumModule(op: string) =
 	            int i = blockDim.x * blockIdx.x + threadIdx.x;
 	            const int stride = blockDim.x * gridDim.x;
 	            __shared__ "+FloatTypeCpp+" temp[32]; 
-                if (threadIdx.x < 32) temp[threadIdx.x] = 0.0f; "+FloatTypeCpp+" acc = 0.0f;
+                if (threadIdx.x < 32) {
+                    temp[threadIdx.x] = 0.0f; 
+                    if (blockIdx.x == 0) O[0] = 0.0f;
+                    }    
+                    "+FloatTypeCpp+" acc = 0.0f;
 	            while (i < N)
 	            {
 		            acc += op(A[i],B[i]);
@@ -563,10 +571,9 @@ type DeviceBinaryMapSumModule(op: string) =
             reraise()
 
     let kernel = ctx.LoadKernelPTX(k.GetPTX(),"Map2SumKernel")
+    let o = new_dev<floatType> 1
 
     member t.A(x: CudaDeviceVariable<floatType>,y: CudaDeviceVariable<floatType>,n) =
-        use o = new_dev<floatType> 1
-        o.Memset(0u)
         let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
         kernel.GridDimensions <- dim3(gridSize)
         kernel.BlockDimensions <- dim3(block_size)
@@ -696,13 +703,67 @@ type DeviceBinaryCoefTransformModule(op: string) =
         if y.rc <> o.rc then failwith "y.rc <> o.rc in DeviceBinaryCoefTransformModule"
         t.A(coef_x,x.dArray,coef_y,y.dArray,o.dArray,x.num_rows*x.num_cols)
 
+/// o <- f(coef_x,x,coef_y,y,coef_z,z)
+type DeviceTrinaryCoefTransformModule(op: string) = 
+    let block_size = 256
+
+    let kernel_code = "
+        //Kernel code:
+        extern \"C\" {
+            __device__ inline "+FloatTypeCpp+" op("+FloatTypeCpp+" coef_x, "+FloatTypeCpp+" x, "+FloatTypeCpp+" coef_y, "+FloatTypeCpp+" y, "+FloatTypeCpp+" coef_z, "+FloatTypeCpp+" z)
+            {
+                return "+op+"
+            }
+        
+            // Device code
+            __global__ void MapCoef3Kernel(const "+FloatTypeCpp+" coef_A, const "+FloatTypeCpp+"* A, const "+FloatTypeCpp+" coef_B, const "+FloatTypeCpp+"* B, const "+FloatTypeCpp+" coef_C, const "+FloatTypeCpp+"* C, "+FloatTypeCpp+"* O, const int N)
+            {
+                int i = blockDim.x * blockIdx.x + threadIdx.x;
+                const int stride = blockDim.x * gridDim.x;
+                while (i < N)
+                {
+                    O[i] = op(coef_A,A[i],coef_B,B[i],coef_C,C[i]);
+                    i += stride;
+                }
+            }
+        }
+
+        "
+    let k = new ManagedCuda.NVRTC.CudaRuntimeCompiler(kernel_code,"MapCoef3Kernel")
+    do  
+        try k.Compile([||])
+        with 
+        | :? NVRTCException as x -> 
+            printfn "%s" (k.GetLogAsString())
+            reraise()
+
+    let kernel = ctx.LoadKernelPTX(k.GetPTX(),"MapCoef3Kernel")
+
+    member t.A(coef_x: floatType, x: CudaDeviceVariable<floatType>, coef_y: floatType, y: CudaDeviceVariable<floatType>, coef_z: floatType, z: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>,n) =
+        let gridSize = min (2*numSm*(1024/block_size)) (divup n block_size)
+        kernel.GridDimensions <- dim3(gridSize)
+        kernel.BlockDimensions <- dim3(block_size)
+        kernel.RunAsync(str.Stream, coef_x,x.DevicePointer,coef_y,y.DevicePointer,coef_z,z.DevicePointer,o.DevicePointer,n) |> ignore
+
+    member t.A(coef_x, x: dMatrix, coef_y, y: dMatrix, coef_z, z: dMatrix) =
+        let o = dMatrix.create(x.num_rows,x.num_cols)
+        t.A(coef_x,x,coef_y,y,coef_z,z,o)
+        o
+
+    member t.A(coef_x, x: dMatrix, coef_y, y: dMatrix, coef_z, z: dMatrix, o: dMatrix) =
+        if x.rc <> y.rc then failwith "x.rc <> y.rc in DeviceTrinaryCoefTransformModule"
+        if y.rc <> z.rc then failwith "y.rc <> z.rc in DeviceTrinaryCoefTransformModule"
+        if z.rc <> o.rc then failwith "z.rc <> o.rc in DeviceTrinaryCoefTransformModule"
+        t.A(coef_x,x.dArray,coef_y,y.dArray,coef_z,z.dArray,o.dArray,x.num_rows*x.num_cols)
+
+
 // The gradient clipping module.
-let gradclipModule = DeviceUnaryCoefTransformModule "(x < -coef_x) ? -coef_x : (x > coef_x ? coef_x : x);"
+let gradclipModule = lazy DeviceUnaryCoefTransformModule "(x < -coef_x) ? -coef_x : (x > coef_x ? coef_x : x);"
    
 // coef_x = scale
 // coef_y = location
 // y does not get used.
-let randMapModule = DeviceBinaryCoefTransformModule "coef_x*(x-0.5f)+coef_y;"
+let randMapModule = lazy DeviceBinaryCoefTransformModule "coef_x*(x-0.5f)+coef_y;"
 
 type dMatrix with
     /// Generates a matrix sampled from a random uniform distribution in <-1.0f,1.0f]
@@ -713,7 +774,7 @@ type dMatrix with
         cudaRandom.GenerateUniform(cudaBuffer)
 
         // 2.0f*scaling_factor ensures that it is rescaled around zero if the scaling_factor is 1.0f.
-        randMapModule.A(2.0f*scaling_factor,cudaBuffer,location,cudaBuffer,cudaBuffer,weights_total_size)
+        randMapModule.Value.A(2.0f*scaling_factor,cudaBuffer,location,cudaBuffer,cudaBuffer,weights_total_size)
 
         dMatrix.create(weights_num_rows,weights_num_cols,cudaBuffer)
 
@@ -723,7 +784,7 @@ type dMatrix with
 
         cudaRandom.GenerateUniform(t.dArray)
         // 2.0f*scaling_factor ensures that it is rescaled around zero if the scaling_factor is 1.0f.
-        randMapModule.A(2.0f*scaling_factor,t,location,t,t)
+        randMapModule.Value.A(2.0f*scaling_factor,t,location,t,t)
 
 type DeviceGetSliceModule() = 
     let block_size = 256
@@ -896,8 +957,8 @@ type DeviceSetSliceModule() =
         kernel.RunAsync(str.Stream, x.dArray.DevicePointer,y.dArray.DevicePointer,start_row, end_row, x.num_rows, start_col, end_col, x.num_cols, order) |> ignore
 
 // The Item and GetSlice operators. Column major
-let setsliceModule = DeviceSetSliceModule()
-let getsliceModule = DeviceGetSliceModule()
+let setsliceModule = lazy DeviceSetSliceModule()
+let getsliceModule = lazy DeviceGetSliceModule()
 
 type dMatrix with
     member t.GetSlice(rowStart: int option, rowFinish : int option,
@@ -906,17 +967,17 @@ type dMatrix with
         let rowFinish = defaultArg rowFinish (t.num_rows-1)
         let colStart = defaultArg colStart 0
         let colFinish = defaultArg colFinish (t.num_cols-1)
-        getsliceModule.AC(t,rowStart,rowFinish,colStart,colFinish)
+        getsliceModule.Value.AC(t,rowStart,rowFinish,colStart,colFinish)
 
     member t.GetSlice(row: int, colStart: int option, colFinish: int option) =
             let colStart = defaultArg colStart 0
             let colFinish = defaultArg colFinish t.num_cols-1
-            getsliceModule.AC(t,row,row,colStart,colFinish)
+            getsliceModule.Value.AC(t,row,row,colStart,colFinish)
 
     member t.GetSlice(rowStart: int option, rowFinish: int option, col: int) =
             let rowStart = defaultArg rowStart 0
             let rowFinish = defaultArg rowFinish t.num_rows-1
-            getsliceModule.AC(t,rowStart,rowFinish,col,col)
+            getsliceModule.Value.AC(t,rowStart,rowFinish,col,col)
 
     member t.SetSlice(rowStart: int option, rowFinish : int option,
                          colStart: int option, colFinish : int option, y) =
@@ -924,18 +985,105 @@ type dMatrix with
         let rowFinish = defaultArg rowFinish (t.num_rows-1)
         let colStart = defaultArg colStart 0
         let colFinish = defaultArg colFinish (t.num_cols-1)
-        setsliceModule.AC(t,y,rowStart,rowFinish,colStart,colFinish)
+        setsliceModule.Value.AC(t,y,rowStart,rowFinish,colStart,colFinish)
 
     member t.SetSlice(row: int, colStart: int option, colFinish: int option,y) =
             let colStart = defaultArg colStart 0
             let colFinish = defaultArg colFinish t.num_cols-1
-            setsliceModule.AC(t,y,row,row,colStart,colFinish)
+            setsliceModule.Value.AC(t,y,row,row,colStart,colFinish)
 
     member t.SetSlice(rowStart: int option, rowFinish: int option, col: int,y) =
             let rowStart = defaultArg rowStart 0
             let rowFinish = defaultArg rowFinish t.num_rows-1
-            setsliceModule.AC(t,y,rowStart,rowFinish,col,col)
+            setsliceModule.Value.AC(t,y,rowStart,rowFinish,col,col)
 
+/// o <- max_col(x)
+/// Sets all except one of the max of a column to zero.
+type DeviceMaxColumnActivationModule() = 
+    let block_size = 128
+
+    let kernel_code = "
+        //Kernel code:
+        extern \"C\" {
+            #define INIT __int_as_float(0xff800000) // The constant init for the reduce operations. This is float negative infinity.
+            // The max reduce version.
+            __device__ inline "+FloatTypeCpp+" warpReduce("+FloatTypeCpp+" value){
+	            for (int i=1; i<32; i*=2) {
+                    "+FloatTypeCpp+" tmp = __shfl_xor(value, i);
+                    value = (tmp > value) ? tmp : value;
+                    }
+	            return value;
+            }
+              
+            __device__ inline "+FloatTypeCpp+" blockReduce("+FloatTypeCpp+" value){
+	            __shared__ "+FloatTypeCpp+" temp[32];
+                if (threadIdx.x < 32) temp[threadIdx.x] = INIT; "+FloatTypeCpp+" out_partial = warpReduce(value);
+                __syncthreads();
+	            if (threadIdx.x % 32 == 0) temp[threadIdx.x / 32] = out_partial;
+                __syncthreads();
+	            if (threadIdx.x < 32) out_partial = warpReduce(temp[threadIdx.x]);
+                return out_partial;
+            }
+
+            // Device code
+            __global__ void Kernel(const "+FloatTypeCpp+"* A, "+FloatTypeCpp+"* O, const int num_rows, const int num_cols)
+            {
+                int row = threadIdx.x;
+                //const int col = blockIdx.x;
+                int col_idx = blockIdx.x*num_rows; "+FloatTypeCpp+" max = INIT; // This is the negative infinity for floats.
+                int index = -1;
+                while (row < num_rows)
+                {
+                   if (A[row+col_idx] > max) {
+                        max = A[row+col_idx];
+                        index = row;
+                        }
+                    row += blockDim.x;
+                }
+                
+                __shared__ "+FloatTypeCpp+" max_index;
+                if (max == blockReduce(max)) max_index = index;
+                __syncthreads();
+                index = max_index; // These last four lines are to make absolutely sure that only one max is selected in case there is more than one.
+                row = threadIdx.x;
+                while (row < num_rows)
+                {
+                    O[row+col_idx] = (row == index) ? max : 0.0f;
+                    row += blockDim.x;
+                }
+            }
+        }
+
+        "
+    let k = new ManagedCuda.NVRTC.CudaRuntimeCompiler(kernel_code,"Kernel")
+    do  
+        try k.Compile([|"-arch=compute_30"|])
+        with 
+        | :? NVRTCException as x -> 
+            printfn "%s" (k.GetLogAsString())
+            reraise()
+
+    let kernel = ctx.LoadKernelPTX(k.GetPTX(),"Kernel")
+
+    member t.A(x: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>, m:int , n: int) =
+        kernel.GridDimensions <- dim3(n)
+        kernel.BlockDimensions <- dim3(block_size)
+        kernel.RunAsync(str.Stream,x.DevicePointer,o.DevicePointer,m,n) |> ignore
+
+    member t.A(x: dMatrix, o: dMatrix) =
+        if x.rc <> o.rc then failwith "x.rc <> o.rc"
+        t.A(x.dArray,o.dArray,x.num_rows,x.num_cols)
+
+    member t.A(x: dMatrix) =
+        let o = dMatrix.create(x.num_rows,x.num_cols)
+        t.A(x.dArray,o.dArray,x.num_rows,x.num_cols)
+        o
+
+let maxColumnModule = lazy new DeviceMaxColumnActivationModule()
+let accuracyModule = lazy new DeviceBinaryMapSumModule "(x*y == 0.0f) ? 0.0f : 1.0f;"
+let get_accuracy targets activations =
+    use o = maxColumnModule.Value.A(activations)
+    accuracyModule.Value.A(targets,o)
 
 type Df_rec = {
     P : floatType ref
@@ -949,22 +1097,22 @@ type Df_rec = {
         {P=P;A=ref 0.0f;is_constant=true}
 
 type DM_rec = {
-    P : dMatrix ref
-    A : dMatrix ref
+    P : dMatrix
+    A : dMatrix
     is_constant : bool
     } with
 
     static member create (P: dMatrix) =
-        {P=ref P;A=ref <| P.zeroLike();is_constant=false}
+        {P=P;A=P.zeroLike();is_constant=false}
         
     static member createConstant (P: dMatrix) =
-        {P=ref P;A=ref (dMatrix.createEmpty);is_constant=true}
+        {P=P;A=dMatrix.createEmpty;is_constant=true}
 
     static member createEmpty =
-        {P=ref (dMatrix.createEmpty);A=ref (dMatrix.createEmpty);is_constant=false}
+        {P=dMatrix.createEmpty;A=dMatrix.createEmpty;is_constant=false}
         
     static member createEmptyConstant =
-        {P=ref (dMatrix.createEmpty);A=ref (dMatrix.createEmpty);is_constant=true}
+        {P=dMatrix.createEmpty;A=dMatrix.createEmpty;is_constant=true}
 
     /// Resizes the primal and the adjoint if they are below nr*nc in size.
     member t.Resize nr nc =
@@ -976,12 +1124,12 @@ type DM_rec = {
 
         // If the class is larger, replace the reference else the function will mutably just adjust
         // the num_rows and num_col fields.
-        (!p).ReplaceIf nr nc
-        (!a).ReplaceIf nr nc
+        p.ReplaceIf nr nc
+        a.ReplaceIf nr nc
 
     member t.Dispose() = 
-        (!t.P :> IDisposable).Dispose()
-        (!t.A :> IDisposable).Dispose()
+        (t.P :> IDisposable).Dispose()
+        (t.A :> IDisposable).Dispose()
 
 let Noop() = ()
 type Df = 
@@ -1002,9 +1150,10 @@ and DM =
     static member makeNode(hidden_size, input_size) =
         let p = dMatrix.create(hidden_size,input_size)
         {r=DM_rec.create p;ff=Noop;fb=Noop}
-
     static member makeNode(hidden_size, input_size, input: floatType[]) =
         let p = dMatrix.create(hidden_size,input_size, input)
+        {r=DM_rec.create p;ff=Noop;fb=Noop}
+    static member makeNode p =
         {r=DM_rec.create p;ff=Noop;fb=Noop}
 
     static member makeConstantNode(hidden_size, input_size, input: floatType[]) =
@@ -1059,7 +1208,7 @@ type tapeType() =
         for i=tape.Count-1 downto 0 do 
             match tape.[i] with
             | :? Df as x -> x.r.A := 0.0f
-            | :? DM as x -> x.r.A.contents.setZero()
+            | :? DM as x -> x.r.A.setZero()
             | _ -> failwith "Type not supported"
     /// Resets the adjoints of the selected tape.
     member t.resetTapePrimal select = 
@@ -1068,7 +1217,7 @@ type tapeType() =
             for i=tape.Count-1 downto 0 do 
                 match tape.[i] with
                 | :? Df as x -> x.r.P := 0.0f
-                | :? DM as x -> x.r.P.contents.setZero()
+                | :? DM as x -> x.r.P.setZero()
                 | _ -> failwith "Type not supported"
     /// Disposes all the elements of the select tape and then clears it including the memory buffer.
     member t.Dispose select =
@@ -1127,10 +1276,12 @@ type tapeType() =
             memory.Add(t)
             t
 
+/// The global tape instance.
 let tape = tapeType()
 
-let hadamaradMultiplicationModule = new DeviceBinaryTransformModule "x*y;"
-let hadamaradMultiplicationErrorModule = new DeviceTrinaryTransformModule "x*y+z;"
+let hadamaradMultiplicationModule = lazy new DeviceBinaryTransformModule "x*y;"
+let hadamaradMultiplicationErrorModule = lazy new DeviceTrinaryTransformModule "x*y+z;"
+/// Hadamarad (elementwise) multiplication function.
 let hadmult (a: DM) (b: DM) =
     let va = a.r.P
     let vb = b.r.P
@@ -1142,12 +1293,12 @@ let hadmult (a: DM) (b: DM) =
     let error = node.A
 
     let ff () = 
-        let nr, nc = (!va).rc
+        let nr, nc = va.rc
         node.Resize nr nc
-        hadamaradMultiplicationModule.A(!va, !vb, !c)
+        hadamaradMultiplicationModule.Value.A(va, vb, c)
     let fb () = 
-        if a.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!vb,!error,!el,!el)
-        if b.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!va,!error,!er,!er)
+        if a.r.is_constant = false then hadamaradMultiplicationErrorModule.Value.A(vb,error,el,el)
+        if b.r.is_constant = false then hadamaradMultiplicationErrorModule.Value.A(va,error,er,er)
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
@@ -1165,32 +1316,32 @@ let linear_layer (mm: (DM*DM) []) (hads: (DM*DM) []) (bias: DM option) =
     let ff() =
         if mm.Length > 0 then 
             let l,r = mm.[0]
-            let nr = (!l.r.P).num_rows
-            let nc = (!r.r.P).num_cols
+            let nr = l.r.P.num_rows
+            let nc = r.r.P.num_cols
             node.Resize nr nc
         else if hads.Length > 0 then
             let l,r = hads.[0]
-            let nr,nc = (!l.r.P).rc
+            let nr,nc = l.r.P.rc
             node.Resize nr nc
         else failwith "Invalid input into linear_layer."
 
         match bias with
-        | Some bias -> broadcastAdd2 0.0f !c 1.0f !bias.r.P
-        | None -> (!c).setZero()
+        | Some bias -> broadcastAdd2 0.0f c 1.0f bias.r.P
+        | None -> c.setZero()
                 
-        for l,r in mm do gemm2 nT nT 1.0f !l.r.P !r.r.P 1.0f !c
-        for l,r in hads do hadamaradMultiplicationErrorModule.A(!l.r.P, !r.r.P, !c, !c) //c = l.*r+c
+        for l,r in mm do gemm2 nT nT 1.0f l.r.P r.r.P 1.0f c
+        for l,r in hads do hadamaradMultiplicationErrorModule.Value.A(l.r.P, r.r.P, c, c) //c = l.*r+c
 
     let fb() =
         for l,r in mm do
-            if l.r.is_constant = false then gemm2 nT T 1.0f !error !r.r.P 1.0f !l.r.A
-            if r.r.is_constant = false then gemm2 T nT 1.0f !l.r.P !error 1.0f !r.r.A
+            if l.r.is_constant = false then gemm2 nT T 1.0f error r.r.P 1.0f l.r.A
+            if r.r.is_constant = false then gemm2 T nT 1.0f l.r.P error 1.0f r.r.A
         for l,r in hads do 
-            if l.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!error, !r.r.P, !l.r.A, !l.r.A)
-            if r.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!l.r.P, !error, !r.r.A, !r.r.A)
+            if l.r.is_constant = false then hadamaradMultiplicationErrorModule.Value.A(error, r.r.P, l.r.A, l.r.A)
+            if r.r.is_constant = false then hadamaradMultiplicationErrorModule.Value.A(l.r.P, error, r.r.A, r.r.A)
         
         match bias with
-        | Some bias -> rowSum2 1.0f !error 1.0f !bias.r.A
+        | Some bias -> rowSum2 1.0f error 1.0f bias.r.A
         | None -> ()
     let t = DM.create(node,ff,fb)
     tape.Add(t)
@@ -1203,23 +1354,23 @@ let linear_layer_matmult (mm: (DM*DM) []) (bias: DM option) =
 
     let ff() =
         let l,r = mm.[0]
-        let nr = (!l.r.P).num_rows
-        let nc = (!r.r.P).num_cols
+        let nr = (l.r.P).num_rows
+        let nc = (r.r.P).num_cols
         node.Resize nr nc
 
-        gemm2 nT nT 1.0f !l.r.P !r.r.P 0.0f !c
-        for l,r in mm.[1..] do gemm2 nT nT 1.0f !l.r.P !r.r.P 1.0f !c
+        gemm2 nT nT 1.0f l.r.P r.r.P 0.0f c
+        for l,r in mm.[1..] do gemm2 nT nT 1.0f l.r.P r.r.P 1.0f c
 
         match bias with
-        | Some bias -> broadcastAdd2 1.0f !c 1.0f !bias.r.P
+        | Some bias -> broadcastAdd2 1.0f c 1.0f bias.r.P
         | None -> ()
 
     let fb() =
         for l,r in mm do
-            if l.r.is_constant = false then gemm2 nT T 1.0f !error !r.r.P 1.0f !l.r.A
-            if r.r.is_constant = false then gemm2 T nT 1.0f !l.r.P !error 1.0f !r.r.A
+            if l.r.is_constant = false then gemm2 nT T 1.0f error r.r.P 1.0f l.r.A
+            if r.r.is_constant = false then gemm2 T nT 1.0f l.r.P error 1.0f r.r.A
         match bias with
-        | Some bias -> rowSum2 1.0f !error 1.0f !bias.r.A
+        | Some bias -> rowSum2 1.0f error 1.0f bias.r.A
         | None -> ()
     let t = DM.create(node,ff,fb)
     tape.Add(t)
@@ -1232,19 +1383,19 @@ let linear_layer_hads (hads: (DM*DM) []) =
 
     let ff() =
         let l,r = hads.[0]
-        let nr,nc = (!l.r.P).rc
+        let nr,nc = (l.r.P).rc
         node.Resize nr nc
-        hadamaradMultiplicationModule.A(!l.r.P,!r.r.P,!c)
-        for l,r in hads.[1..] do hadamaradMultiplicationErrorModule.A(!l.r.P, !r.r.P, !c, !c) //c = l.*r+c
+        hadamaradMultiplicationModule.Value.A(l.r.P,r.r.P,c)
+        for l,r in hads.[1..] do hadamaradMultiplicationErrorModule.Value.A(l.r.P, r.r.P, c, c) //c = l.*r+c
     let fb() =
         for l,r in hads do 
-            if l.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!error, !r.r.P, !l.r.A, !l.r.A)
-            if r.r.is_constant = false then hadamaradMultiplicationErrorModule.A(!l.r.P, !error, !r.r.A, !r.r.A)
+            if l.r.is_constant = false then hadamaradMultiplicationErrorModule.Value.A(error, r.r.P, l.r.A, l.r.A)
+            if r.r.is_constant = false then hadamaradMultiplicationErrorModule.Value.A(l.r.P, error, r.r.A, r.r.A)
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
     
-
+/// Matrix-matrix multiply.
 let matmult (a: DM) (b:DM) =
     let va = a.r.P
     let vb = b.r.P
@@ -1256,13 +1407,13 @@ let matmult (a: DM) (b:DM) =
     let error = node.A
         
     let ff () = 
-        let nr = (!va).num_rows
-        let nc = (!vb).num_cols
+        let nr = (va).num_rows
+        let nc = (vb).num_cols
         node.Resize nr nc
-        gemm2 nT nT 1.0f !va !vb 0.0f !c
+        gemm2 nT nT 1.0f va vb 0.0f c
     let fb () = 
-        if a.r.is_constant = false then gemm2 nT T 1.0f !error !vb 1.0f !el// The derivative with respect to the left. So the above argument gets inserted from the right left. Usually error * input.
-        if b.r.is_constant = false then gemm2 T nT 1.0f !va !error 1.0f !er// The derivative with respect to the right. So the above argument gets inserted from the right side. Usually weights * error.
+        if a.r.is_constant = false then gemm2 nT T 1.0f error vb 1.0f el// The derivative with respect to the left. So the above argument gets inserted from the right left. Usually error * input.
+        if b.r.is_constant = false then gemm2 T nT 1.0f va error 1.0f er// The derivative with respect to the right. So the above argument gets inserted from the right side. Usually weights * error.
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
@@ -1280,22 +1431,40 @@ let addb (a: DM) (b: DM) = // b is for bias and a is for preactivations.
     let error = node.A
 
     let ff () = 
-        let nr,nc = (!va).rc
+        let nr,nc = (va).rc
         node.Resize nr nc
-        geam2 nT nT 1.0f !va 0.0f !c !c
-        broadcastAdd2 1.0f !c 1.0f !vb
+        geam2 nT nT 1.0f va 0.0f c c
+        broadcastAdd2 1.0f c 1.0f vb
     let fb () = 
-        geam2 nT nT 1.0f !el 1.0f !error !el
-        rowSum2 1.0f !error 1.0f !er
+        geam2 nT nT 1.0f el 1.0f error el
+        rowSum2 1.0f error 1.0f er
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+//coef_x=scalar
+let scalarAddModule = lazy new DeviceUnaryCoefTransformModule "coef_x + x;"
+let scalar_add (a:DM) b =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = tape.GetDMIf
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (va).rc
+        node.Resize nr nc
+        scalarAddModule.Value.A(b,va,c)
+    let fb () = geam2 nT nT 1.0f error 1.0f el el
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
     
-
-let sigmoidModule = new DeviceUnaryTransformModule "1.0f/(1.0f+expf(-x));"
+let sigmoidModule = lazy new DeviceUnaryTransformModule "1.0f/(1.0f+expf(-x));"
 //y = error
 //z = previous adjoint value
-let sigmoidErrorModule = new DeviceTrinaryTransformModule "x*(1.0f-x)*y + z;"
+let sigmoidErrorModule = lazy new DeviceTrinaryTransformModule "x*(1.0f-x)*y + z;"
 let sigmoid (a:DM) =
     let va = a.r.P
     let el = a.r.A
@@ -1305,19 +1474,39 @@ let sigmoid (a:DM) =
     let error = node.A
 
     let ff () = 
-        let nr,nc = (!va).rc
+        let nr,nc = (va).rc
         node.Resize nr nc
-        sigmoidModule.A(!va,!c)
-    let fb () = sigmoidErrorModule.A(!c,!error,!el,!el)
+        sigmoidModule.Value.A(va,c)
+    let fb () = sigmoidErrorModule.Value.A(c,error,el,el)
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
     
-
-let tanhModule = new DeviceUnaryTransformModule "tanhf(x);"
+let steepSigmoidModule = lazy new DeviceUnaryCoefTransformModule "1.0f/(1.0f+expf(-coef_x*x));"
 //y = error
 //z = previous adjoint value
-let tanhErrorModule = new DeviceTrinaryTransformModule "(1.0f-x*x)*y + z;"
+let steepSigmoidErrorModule = lazy new DeviceTrinaryCoefTransformModule "coef_x*x*(1.0f-x)*y + z;"
+let steep_sigmoid coef (a:DM) =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = tape.GetDMIf
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (va).rc
+        node.Resize nr nc
+        steepSigmoidModule.Value.A(coef,va,c)
+    let fb () = steepSigmoidErrorModule.Value.A(coef,c,coef,error,coef,el,el)
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+let tanhModule = lazy new DeviceUnaryTransformModule "tanhf(x);"
+//y = error
+//z = previous adjoint value
+let tanhErrorModule = lazy new DeviceTrinaryTransformModule "(1.0f-x*x)*y + z;"
 let tanh_ (a:DM) =
     let va = a.r.P
     let el = a.r.A
@@ -1327,14 +1516,46 @@ let tanh_ (a:DM) =
     let error = node.A
 
     let ff () = 
-        let nr,nc = (!va).rc
+        let nr,nc = (va).rc
         node.Resize nr nc
-        tanhModule.A(!va,!c)
-    let fb () = tanhErrorModule.A(!c,!error,!el,!el)
+        tanhModule.Value.A(va,c)
+    let fb () = tanhErrorModule.Value.A(c,error,el,el)
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
-    
+
+let clipModule = lazy new DeviceTrinaryCoefTransformModule "((x < coef_x) ? coef_x : (x > coef_y ? coef_y : x))+coef_z;"
+let clipErrorModule = lazy new DeviceTrinaryCoefTransformModule "y*((x < coef_x) ? 0.0f : (x > coef_y ? 0.0f : 1.0f))+z;"
+/// o <- clip(min,max,a)+scalar
+/// The clip function. Can be used as Relu by setting max to positive infinity. 
+/// Can be used to make linear clipped sigmoid by setting min,max,scalar to -0.5f,0.5f,0.5f.
+let clip min max a scalar =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = tape.GetDMIf
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (va).rc
+        node.Resize nr nc
+        clipModule.Value.A(min,va,max,va,scalar,va,c)
+    let fb () = 
+        clipErrorModule.Value.A(min,va,max,error,max,el,el)
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
+
+let inline clipped_sigmoid x = clip 0.0001f 0.9999f (sigmoid x) 0.0f
+let inline clipped_steep_sigmoid coef x = clip 0.0001f 0.9999f (steep_sigmoid coef x) 0.0f
+let inline relu x = clip 0.0f Single.PositiveInfinity x 0.0f
+
+// The linear versions of the sigmoid and tanh.
+let inline clipped_linear_sigmoid x = clip -0.4999f 0.4999f x 0.5f // Clipped linear sigmoid in the [0.001,0.999] range.
+let inline linear_sigmoid x = clip -0.5f 0.5f x 0.0f // Linear sigmoid in the [0.0,1.0] range.
+let inline linear_tanh x = clip -1.0f 1.0f x 0.0f // Linear tanh in the [-1.0,1.0] range.
+
 
 let add alpha (a: DM) beta (b: DM) =
     let va = a.r.P
@@ -1347,13 +1568,13 @@ let add alpha (a: DM) beta (b: DM) =
     let error = node.A
 
     let ff () = 
-        let nr,nc = (!va).rc
+        let nr,nc = (va).rc
         node.Resize nr nc
-        geam2 nT nT alpha !va beta !vb !c
+        geam2 nT nT alpha va beta vb c
     let fb () = 
-        let nr,nc = (!va).rc
-        if (a.r.is_constant) = false then geam2 nT nT alpha !error 1.0f !el !el
-        if (b.r.is_constant) = false then geam2 nT nT 1.0f !er beta !error !er
+        let nr,nc = (va).rc
+        if (a.r.is_constant) = false then geam2 nT nT alpha error 1.0f el el
+        if (b.r.is_constant) = false then geam2 nT nT 1.0f er beta error er
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
@@ -1370,10 +1591,10 @@ let linear_layer_ (mm: (RDM*RDM) []) (hh: (RDM*RDM) []) (bias: RDM option) =
     | None -> sum
 *)
 
-let squareModule = new DeviceUnaryTransformModule "x*x;"
+let squareModule = lazy new DeviceUnaryTransformModule "x*x;"
 //y = error
 //z = previous adjoint value
-let squareErrorModule = new DeviceTrinaryTransformModule "2.0f*x*y + z;"
+let squareErrorModule = lazy new DeviceTrinaryTransformModule "2.0f*x*y + z;"
 let square (a:DM) =
     let va = a.r.P
     let el = a.r.A
@@ -1383,16 +1604,16 @@ let square (a:DM) =
     let error = node.A
 
     let ff () = 
-        let nr,nc = (!va).rc
+        let nr,nc = (va).rc
         node.Resize nr nc
-        squareModule.A(!va,!c)
-    let fb () = squareErrorModule.A(!va,!error,!el,!el)
+        squareModule.Value.A(va,c)
+    let fb () = squareErrorModule.Value.A(va,error,el,el)
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
 
-let sumModule = new DeviceUnaryMapSumModule "x;"
-let sumErrorModule = new DeviceUnaryCoefTransformModule "coef_x + x;" 
+let sumModule = lazy new DeviceUnaryMapSumModule "x;"
+let sumErrorModule = lazy new DeviceUnaryCoefTransformModule "coef_x + x;" 
 let sum (a:DM) =
     let va = a.r.P
     let el = a.r.A
@@ -1400,8 +1621,8 @@ let sum (a:DM) =
     let node = Df_rec.create (ref 0.0f)
     let error = node.A
     
-    let ff () = node.P := sumModule.A(!va)
-    let fb () = sumErrorModule.A(!error,!el,!el)
+    let ff () = node.P := sumModule.Value.A(va)
+    let fb () = sumErrorModule.Value.A(!error,el,el)
     let t = Df.create(node,ff,fb)
     tape.Add(t)
     t
@@ -1428,10 +1649,10 @@ let sum_scalars (a:Df[]) =
     tape.Add(t)
     t
 
-let logModule = new DeviceUnaryTransformModule "logf(x);"
+let logModule = lazy new DeviceUnaryTransformModule "logf(x);"
 //y=error
 //z=previous adjoint
-let logErrorModule = new DeviceTrinaryTransformModule "y / x + z;"
+let logErrorModule = lazy new DeviceTrinaryTransformModule "y / x + z;"
 let log_ (a:DM) =
     let va = a.r.P
     let el = a.r.A
@@ -1441,17 +1662,18 @@ let log_ (a:DM) =
     let error = node.A
 
     let ff () = 
-        let nr,nc = (!va).rc
+        let nr,nc = (va).rc
         node.Resize nr nc
-        logModule.A(!va,!c)
-    let fb () = logErrorModule.A(!va,!error, !el, !el)
+        logModule.Value.A(va,c)
+    let fb () = logErrorModule.Value.A(va,error, el, el)
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
 
 //coef_x = scalar
 //coef_y = coef
-let scalarMatrixAddModule = new DeviceBinaryCoefTransformModule "coef_x + coef_y*x;"
+let scalarMatrixAddModule = lazy new DeviceBinaryCoefTransformModule "coef_x + coef_y*x;"
+/// o <- scalar + coef*a
 let scalar_matrix_add scalar coef (a:DM) =
     let va = a.r.P
     let el = a.r.A
@@ -1461,29 +1683,10 @@ let scalar_matrix_add scalar coef (a:DM) =
     let error = node.A
 
     let ff () = 
-        let nr,nc = (!va).rc
+        let nr,nc = (va).rc
         node.Resize nr nc
-        scalarMatrixAddModule.A(scalar,!va,coef,!va,!c)
-    let fb () = if a.r.is_constant = false then geam2 nT nT coef !error 1.0f !el !el
-    let t = DM.create(node,ff,fb)
-    tape.Add(t)
-    t
-
-//coef_x=scalar
-let scalarAddModule = new DeviceUnaryCoefTransformModule "coef_x + x;"
-let scalar_add (a:DM) b =
-    let va = a.r.P
-    let el = a.r.A
-
-    let node = tape.GetDMIf
-    let c = node.P
-    let error = node.A
-
-    let ff () = 
-        let nr,nc = (!va).rc
-        node.Resize nr nc
-        scalarAddModule.A(b,!va,!c)
-    let fb () = geam2 nT nT 1.0f !error 1.0f !el !el
+        scalarMatrixAddModule.Value.A(scalar,va,coef,va,c)
+    let fb () = if a.r.is_constant = false then geam2 nT nT coef error 1.0f el el
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
@@ -1497,24 +1700,24 @@ let neg (a:DM) =
     let error = node.A
 
     let ff () = 
-        let nr,nc = (!va).rc
+        let nr,nc = (va).rc
         node.Resize nr nc
-        geam2 nT nT -1.0f !va 0.0f !va !c
-    let fb () = if a.r.is_constant = false then geam2 nT nT -1.0f !error 1.0f !el !el
+        geam2 nT nT -1.0f va 0.0f va c
+    let fb () = if a.r.is_constant = false then geam2 nT nT -1.0f error 1.0f el el
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
 
 let cross_entropy_cost target activations =
-    let cross_ent = linear_layer [||] [|target,log_ activations;scalar_matrix_add 1.0f -1.0f target, log_ (scalar_matrix_add 1.0f -1.0f activations)|] None
+    let cross_ent = linear_layer_hads [|target,log_ activations;scalar_matrix_add 1.0f -1.0f target, log_ (scalar_matrix_add 1.0f -1.0f activations)|]
     let s = sum cross_ent
-    scale (-1.0f/floatType (!target.r.P).num_cols) s
+    scale (-1.0f/floatType (target.r.P).num_cols) s
 
 let squared_error_cost target activations =
     let r1 = add 1.0f target -1.0f activations
     let r2 = square r1
     let r3 = sum r2
-    scale (0.5f/floatType (!target.r.P).num_cols) r3
+    scale (0.5f/floatType (target.r.P).num_cols) r3
 
 // A feedforward layer of neurons
 type FeedforwardLayer =
@@ -1645,22 +1848,22 @@ type GRULayer =
 
 let add_gradients_to_weights (base_nodes: DM[]) learning_rate clip_coef = 
     for x in base_nodes do 
-        gradclipModule.A(clip_coef,!x.r.A,!x.r.A)
-        geam2 nT nT 1.0f !x.r.P -learning_rate !x.r.A !x.r.P
+        gradclipModule.Value.A(clip_coef,x.r.A,x.r.A)
+        geam2 nT nT 1.0f x.r.P -learning_rate x.r.A x.r.P
 
 let add_gradients_to_weights' (base_nodes: DM[]) learning_rate = 
     for x in base_nodes do 
-        geam2 nT nT 1.0f !x.r.P -learning_rate !x.r.A !x.r.P
+        geam2 nT nT 1.0f x.r.P -learning_rate x.r.A x.r.P
 
 let nesterov_add_gradients (base_nodes: DM[]) (momentum_matrices: dMatrix[]) (copy_weights: dMatrix[]) learning_rate momentum_rate clip_coef = 
     for i=0 to base_nodes.Length-1 do
         let x = base_nodes.[i] 
         let m = momentum_matrices.[i]
         let c = copy_weights.[i]
-        gradclipModule.A(clip_coef,!x.r.A,!x.r.A)
-        geam2 nT nT -learning_rate !x.r.A momentum_rate m m // Add the gradients to the momentum matrices
+        gradclipModule.Value.A(clip_coef,x.r.A,x.r.A)
+        geam2 nT nT -learning_rate x.r.A momentum_rate m m // Add the gradients to the momentum matrices
         geam2 nT nT 1.0f m 1.0f c c // Add momentum to the copy matrix
-        geam2 nT nT 1.0f c momentum_rate m !x.r.P // Apply Nesterov's momentum to the weights. It is really the copy weights that serve as the basis.
+        geam2 nT nT 1.0f c momentum_rate m x.r.P // Apply Nesterov's momentum to the weights. It is really the copy weights that serve as the basis.
 
 let save_data filename (ar: DM []) =
     let stream_data = File.OpenWrite(filename)
@@ -1671,9 +1874,9 @@ let save_data filename (ar: DM []) =
 
     writer_data.Write(ar.Length)
     for x in ar do
-        writer_data.Write((!x.r.P).num_rows)
-        writer_data.Write((!x.r.P).num_cols)
-        let t = (!x.r.P).dArray.Gather()
+        writer_data.Write((x.r.P).num_rows)
+        writer_data.Write((x.r.P).num_cols)
+        let t = (x.r.P).dArray.Gather()
         for f in t do writer_data.Write(f)
 
     writer_data.Close()
@@ -1800,3 +2003,4 @@ type LSTMLayer =
         let c' = linear_layer [||] [|block_input,input_gate;c,forget_gate|] None
         let output_gate = linear_layer [|l.U_o,y;l.P_o,c'|] [||] (Some l.b_o) |> sigmoid
         hadmult (l.block_output_a c') output_gate, c'
+

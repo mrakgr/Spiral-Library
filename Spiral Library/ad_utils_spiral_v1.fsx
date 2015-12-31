@@ -1079,12 +1079,6 @@ type DeviceMaxColumnActivationModule() =
         t.A(x.dArray,o.dArray,x.num_rows,x.num_cols)
         o
 
-let maxColumnModule = lazy new DeviceMaxColumnActivationModule()
-let accuracyModule = lazy new DeviceBinaryMapSumModule "(x*y == 0.0f) ? 0.0f : 1.0f;"
-let get_accuracy targets activations =
-    use o = maxColumnModule.Value.A(activations)
-    accuracyModule.Value.A(targets,o)
-
 type Df_rec = {
     P : floatType ref
     A : floatType ref
@@ -1719,6 +1713,14 @@ let squared_error_cost target activations =
     let r3 = sum r2
     scale (0.5f/floatType (target.r.P).num_cols) r3
 
+let maxColumnModule = lazy new DeviceMaxColumnActivationModule()
+let accuracyModule = lazy new DeviceBinaryMapSumModule "(x*y == 0.0f) ? 0.0f : 1.0f;"
+let get_accuracy targets activations =
+    let o = tape.GetDMIf
+    o.P.ReplaceIf activations.num_rows activations.num_cols
+    maxColumnModule.Value.A(activations,o.P)
+    accuracyModule.Value.A(targets,o.P)
+
 // A feedforward layer of neurons
 type FeedforwardLayer =
     {
@@ -2003,4 +2005,3 @@ type LSTMLayer =
         let c' = linear_layer [||] [|block_input,input_gate;c,forget_gate|] None
         let output_gate = linear_layer [|l.U_o,y;l.P_o,c'|] [||] (Some l.b_o) |> sigmoid
         hadmult (l.block_output_a c') output_gate, c'
-

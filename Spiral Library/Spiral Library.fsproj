@@ -59,11 +59,11 @@
     <None Include="embedded_reber.fsx" />
     <None Include="reber_grammar_test.fsx" />
     <None Include="spiral_old.fsx" />
-    <None Include="load_mnist.fsx" />
     <None Include="dump_branching.fsx" />
     <None Include="cross_entropy_xor_test.fsx" />
     <None Include="batched_test.fsx" />
     <None Include="deviceMaxIndexModule.fsx" />
+    <None Include="post9.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="CudaBlas">

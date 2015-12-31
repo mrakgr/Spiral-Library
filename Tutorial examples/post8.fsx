@@ -28,6 +28,8 @@ open System.Collections
 let train_data = make_imageset (__SOURCE_DIRECTORY__ + trainSetData) (__SOURCE_DIRECTORY__ + trainSetLabels) 
 let test_data = make_imageset (__SOURCE_DIRECTORY__ + testSetData) (__SOURCE_DIRECTORY__ + testSetLabels)
 
+/// Returns a tuple of training set and label set split into minibatches.
+/// Uses the GetSlice module.
 let make_set (s : MnistImageset) batch_size =
     /// Function that splits the dataset along the columns.
     let split_cols (x:dMatrix) batch_size =
@@ -39,39 +41,48 @@ let make_set (s : MnistImageset) batch_size =
             |]
     use d_data = dMatrix.create(s.num_rows*s.num_cols,s.num_images,s.float_data) // Loads the data
     use d_label = dMatrix.create(10,s.num_images,s.float_labels) // Loads the labels
-    let ar_data = split_cols d_data batch_size
-    let ar_label = split_cols d_label batch_size
-    ar_data |> Array.map (fun x -> DM.makeConstantNode x), ar_label |> Array.map (fun x -> DM.makeConstantNode x)
+    let ar_data = split_cols d_data batch_size |> Array.map (fun x -> DM.makeConstantNode x)
+    let ar_label = split_cols d_label batch_size |> Array.map (fun x -> DM.makeConstantNode x)
+    Array.zip ar_data ar_label
 
-let dtrain_data, dtrain_label = make_set train_data 128
-let dtest_data, dtest_label = make_set test_data 128
+// The type of each of these two variable is dMatrix [], dMatrix [] - a tuple.
+let dtrain = make_set train_data 128
+let dtest = make_set test_data 128 
 
 let l1 = FeedforwardLayer.createRandomLayer 1024 784 relu
 let l2 = FeedforwardLayer.createRandomLayer 2048 1024 relu
 let l3 = FeedforwardLayer.createRandomLayer 1024 2048 relu
 let l4 = FeedforwardLayer.createRandomLayer 10 1024 (clipped_steep_sigmoid 3.0f)
 let layers = [|l1;l2;l3;l4|]
-//let l2 = FeedforwardLayer.createRandomLayer 10 1024 sigmoid
 
 // This does not actually train it, it just initiates the tree for later training.
-let training_loop (data: DM) (targets: DM) (layers: FeedforwardLayer[]) =
+let training_loop' (data: DM) (targets: DM) (layers: FeedforwardLayer[]) =
     let outputs = layers |> Array.fold (fun state layer -> layer.runLayer state) data
     // I make the accuracy calculation lazy. This is similar to returning a lambda function that calculates the accuracy
     // although in this case it will be calculated at most once.
     lazy get_accuracy targets.r.P outputs.r.P, cross_entropy_cost targets outputs 
 
+// This does not actually train it, it just initiates the tree for later training.
+// Imperative form.
+let training_loop (data: DM) (targets: DM) (layers: FeedforwardLayer[]) =
+    let mutable outputs = data
+    for x in layers do
+        outputs <- x.runLayer outputs
+    // I make the accuracy calculation lazy. This is similar to returning a lambda function that calculates the accuracy
+    // although in this case it will be calculated at most once.
+    lazy get_accuracy targets.r.P outputs.r.P, cross_entropy_cost targets outputs 
 
 let train_mnist_sgd num_iters learning_rate (layers: FeedforwardLayer[]) =
     [|
     let mutable r' = 0.0f
-    let base_nodes = layers |> Array.map (fun x -> x.ToArray) |> Array.concat
+    let base_nodes = layers |> Array.map (fun x -> x.ToArray) |> Array.concat // Stores all the base nodes of the layer so they can later be reset.
     for i=1 to num_iters do
-        for i=0 to dtrain_data.Length-1 do
-            let data, target = dtrain_data.[i], dtrain_label.[i]
-            let _,r = training_loop data target layers
+        for x in dtrain do
+            let data, target = x
+            let _,r = training_loop data target layers // Builds the tape.
 
-            tape.forwardpropTape 0
-            r' <- r' + (!r.r.P/ float32 dtrain_data.Length)
+            tape.forwardpropTape 0 // Calculates the forward values. Triggers the ff() closures.
+            r' <- r' + (!r.r.P/ float32 dtrain.Length) // Adds the cost to the accumulator.
             if System.Single.IsNaN r' then failwith "Nan error"
 
             for x in base_nodes do x.r.A.setZero() // Resets the base adjoints
@@ -86,13 +97,13 @@ let train_mnist_sgd num_iters learning_rate (layers: FeedforwardLayer[]) =
         r' <- 0.0f
         let mutable acc = 0.0f
 
-        for i=0 to dtest_data.Length-1 do
-            let data, target = dtest_data.[i], dtest_label.[i]
-            let lazy_acc,r = training_loop data target layers
+        for x in dtest do
+            let data, target = x
+            let lazy_acc,r = training_loop data target layers // Builds the tape.
 
-            tape.forwardpropTape 0
-            r' <- r' + (!r.r.P/ float32 dtest_data.Length)
-            acc <- acc+lazy_acc.Value
+            tape.forwardpropTape 0 // Calculates the forward values. Triggers the ff() closures.
+            r' <- r' + (!r.r.P/ float32 dtest.Length) // Adds the cost to the accumulator.
+            acc <- acc+lazy_acc.Value // Here the accuracy calculation is triggered by accessing it through the Lazy property.
 
             if System.Single.IsNaN r' then failwith "Nan error"
 
@@ -104,8 +115,8 @@ let train_mnist_sgd num_iters learning_rate (layers: FeedforwardLayer[]) =
         r' <- 0.0f
         yield r1,r2
     |]
-let num_iters = 40
-let learning_rate = 0.03f
+let num_iters = 5
+let learning_rate = 0.1f
 #time
 let s = train_mnist_sgd num_iters learning_rate layers
 #time
@@ -114,4 +125,6 @@ let l = [|for l,_ in s do yield l|]
 let r = [|for _,r in s do yield r|]
 
 (Chart.Combine [|Chart.Line l;Chart.Line r|]).ShowChart()
+
+
 

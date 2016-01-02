@@ -1125,9 +1125,10 @@ type DeviceMaxSelectColumnActivationModule(column_size: int) =
                     {
                     const int row = threadIdx.x;
                     const int row_idx = row+blockIdx.x*32;
-                    #pragma unroll // Unroll the loops for performance, though it probably will not work on this part as the col = threadIdx.y is non static.
-                    for (int col = threadIdx.y; col < NUM_COLS_32; col += BLOCK_SIZE_Y) { // Stores everything into shared memory first by reading from the global in a contiguous manner.
-                            ar[row][col] = (row_idx < num_rows && col < num_cols) ? A[row_idx+col*num_rows] : INIT_MIN;
+                    #pragma unroll // Unroll the loops for performance.
+                    for (int i = 0; i < NUM_VARS*ROW_ITERS; i++) { // Stores everything into shared memory first by reading from the global in a contiguous manner.
+                        const int col = threadIdx.y + i*BLOCK_SIZE_Y;
+                        ar[row][col] = (row_idx < num_rows && col < num_cols) ? A[row_idx+col*num_rows] : INIT_MIN;
                         }
                     }
                     __syncthreads();
@@ -1172,8 +1173,9 @@ type DeviceMaxSelectColumnActivationModule(column_size: int) =
                     {
                     const int row = threadIdx.x;
                     const int row_idx = row+blockIdx.x*32;
-                    #pragma unroll
-                    for (int col = threadIdx.y; col < NUM_COLS_32; col += BLOCK_SIZE_Y) {
+                    #pragma unroll // Unroll the loops for performance.
+                    for (int i = 0; i < NUM_VARS*ROW_ITERS; i++) { // Stores the results from shared into global memory.
+                        const int col = threadIdx.y + i*BLOCK_SIZE_Y;
                         if (row_idx < num_rows && col < num_cols) O[row_idx+col*num_rows] = ar[row][col];
                         }
                     }

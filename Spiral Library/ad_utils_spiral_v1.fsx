@@ -1315,6 +1315,7 @@ type Df =
     fb : (unit -> unit)
     }
     static member create(r,ff,fb) = {r=r;ff=ff;fb=fb}
+    static member createEmpty = {r=Df_rec.create(ref 0.0f);ff=Noop;fb=Noop}
 and DM =
     {
     r: DM_rec
@@ -1342,6 +1343,7 @@ and DM =
         let scale = (1.0f / sqrt(hidden_size+input_size |> floatType))
         let p = dMatrix.createRandomUniformMatrix hidden_size input_size scale 0.0f
         {r=DM_rec.create p;ff=Noop;fb=Noop}
+and BlockReverse() = class end // The type that blocks reverse propagation. Used for layerwise pretraining.
 
 open System.Collections.Generic
 type tapeType() =
@@ -1369,14 +1371,17 @@ type tapeType() =
             match tape.[i] with
             | :? Df as x -> x.ff()
             | :? DM as x -> x.ff()
+            | :? BlockReverse as x -> ()
             | _ -> failwith "Type not supported"
     /// Runs all the backward functions in the currently selected tape, starting from the top.
     member t.reversepropTape select = 
         let tape,_ = d.[select]
-        for i=tape.Count-1 downto 0 do 
+        let mutable i = tape.Count-1
+        while i >= 0 do 
             match tape.[i] with
-            | :? Df as x -> x.fb()
-            | :? DM as x -> x.fb()
+            | :? Df as x -> x.fb(); i <- i-1
+            | :? DM as x -> x.fb(); i <- i-1
+            | :? BlockReverse as x -> i <- -1
             | _ -> failwith "Type not supported"
     /// Resets the adjoints of the selected tape.
     member t.resetTapeAdjoint select = 
@@ -1385,6 +1390,7 @@ type tapeType() =
             match tape.[i] with
             | :? Df as x -> x.r.A := 0.0f
             | :? DM as x -> x.r.A.setZero()
+            | :? BlockReverse as x -> ()
             | _ -> failwith "Type not supported"
     /// Resets the adjoints of the selected tape.
     member t.resetTapePrimal select = 
@@ -1394,6 +1400,7 @@ type tapeType() =
                 match tape.[i] with
                 | :? Df as x -> x.r.P := 0.0f
                 | :? DM as x -> x.r.P.setZero()
+                | :? BlockReverse as x -> ()
                 | _ -> failwith "Type not supported"
     /// Disposes all the elements of the select tape and then clears it including the memory buffer.
     member t.Dispose select =
@@ -1403,6 +1410,7 @@ type tapeType() =
             match x with
             | :? Df as x -> ()
             | :? DM as x -> x.r.Dispose()
+            | :? BlockReverse as x -> ()
             | _ -> failwith "Type not supported"
         for x in memory do x.Dispose()
         tape.Clear()
@@ -1424,6 +1432,7 @@ type tapeType() =
                 match x with
                 | :? Df as x -> ()
                 | :? DM as x -> x.r.Dispose()
+                | :? BlockReverse as x -> ()
                 | _ -> failwith "Type not supported"
             for x in memory do x.Dispose()
             tape.Clear()

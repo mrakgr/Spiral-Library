@@ -159,7 +159,7 @@ let mutable loop_iter = 1
 // For the autoencoders it seems 0.1f is a decent learning rate.
 // They blow up with 0.2f.
 // The lower learning rate in the final layer does not help, in fact the higher does.
-// My record here is 99.09% after a few hours of playing around.
+// My record here is 99.1% after a few hours of playing around.
 // Might be possible to do even better with max norm normalization.
 for loop,layers,num_iters,learning_rate in [|loop_1,layers_1,10,0.1f;loop_2,layers_2,10,0.1f;loop_3,layers_3,10,0.1f;loop_3b,layers_fine_tune,10,0.1f;loop_fine_tune,layers_fine_tune,30,0.2f|] do
     printfn "Starting training loop %i..." loop_iter

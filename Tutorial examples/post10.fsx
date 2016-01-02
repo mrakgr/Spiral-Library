@@ -75,8 +75,7 @@ let loop_1 data targets = // These loops are closures. I'll pass them into the f
     squared_error_cost inp out, None
 
 let loop_2 data targets = // The targets do nothing in autoencoders, they are here so the type for the supervised net squares out. This one is for the second.
-    let l = layers_2 |> Array.take 1
-    let r = layers_2 |> Array.skip 1
+    let l,r = layers_2 |> Array.splitAt 1
     let outputs = Array.scan(fun state (layer:IFeedforwardLayer) -> (layer.runLayer state)) data l // Scan is like fold except it returns the intermediates.
     tape.Add(BlockReverse()) // This blocks the reverse pass from running past this point. It is so the gradients get blocked and only the top two layers get trained.
     let outputs = Array.scan(fun state (layer:IFeedforwardLayer) -> (layer.runLayer state)) (outputs |> Array.last) r // Scan is like fold except it returns the intermediates.
@@ -85,8 +84,7 @@ let loop_2 data targets = // The targets do nothing in autoencoders, they are he
     squared_error_cost inp out, None
 
 let loop_3 data targets =
-    let l = layers_3 |> Array.take 2
-    let r = layers_3 |> Array.skip 2
+    let l,r = layers_3 |> Array.splitAt 2
     let outputs = Array.scan(fun state (layer:IFeedforwardLayer) -> (layer.runLayer state)) data l // Scan is like fold except it returns the intermediates.
     tape.Add(BlockReverse()) // This blocks the reverse pass from running past this point. It is so the gradients get blocked and only the top two layers get trained.
     let outputs = Array.scan(fun state (layer:IFeedforwardLayer) -> (layer.runLayer state)) (outputs |> Array.last) r // Scan is like fold except it returns the intermediates.
@@ -95,8 +93,7 @@ let loop_3 data targets =
     squared_error_cost inp out, None
 
 let loop_3b data targets = // This is not for the autoencoder, but for the final logistic regression layer. We train it separately first so it does not distrupt the pretrained weights below it.
-    let l = layers_fine_tune |> Array.take 3
-    let r = layers_fine_tune |> Array.skip 3
+    let l,r = layers_fine_tune |> Array.splitAt 3
     let outputs = Array.scan(fun state (layer:IFeedforwardLayer) -> (layer.runLayer state)) data l // Scan is like fold except it returns the intermediates.
     tape.Add(BlockReverse()) // This blocks the reverse pass from running past this point. It is so the gradients get blocked and only the top two layers get trained.
     let outputs = Array.scan(fun state (layer:IFeedforwardLayer) -> (layer.runLayer state)) (outputs |> Array.last) r // Scan is like fold except it returns the intermediates.

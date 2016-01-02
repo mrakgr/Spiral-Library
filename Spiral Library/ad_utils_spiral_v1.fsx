@@ -1,4 +1,10 @@
-﻿// The Spiral library v1. Basic reverse mode AD on the GPU.
+﻿#if INTERACTIVE
+fsi.ShowDeclarationValues <- false
+fsi.ShowProperties <- false
+fsi.ShowIEnumerable <- false
+#endif
+
+// The Spiral library v1. Basic reverse mode AD on the GPU.
 
 #r "../packages/ManagedCuda-75-x64.7.5.7/lib/net45/x64/ManagedCuda.dll"
 #r "../packages/ManagedCuda-75-x64.7.5.7/lib/net45/x64/NVRTC.dll"
@@ -274,7 +280,7 @@ type dMatrix with
             h_a
 
 
-let inline divup a b = (a+b-1)/b // Division with rounding up.
+let inline divup a b = (a+b-1)/b // Integer division with rounding up. (a-1)/b+1 is another variant on this.
 
 /// o <- f(x)
 type DeviceUnaryTransformModule(op: string) = 
@@ -469,6 +475,7 @@ type DeviceUnaryMapSumModule(op: string) =
             }
         
             __device__ inline "+FloatTypeCpp+" warpDownReduce("+FloatTypeCpp+" value){
+                #pragma unroll
 	            for (int i = 16; i>0; i = i / 2) value += __shfl_down(value, i);
 	            return value;
             }
@@ -533,6 +540,7 @@ type DeviceBinaryMapSumModule(op: string) =
             }
         
             __device__ inline "+FloatTypeCpp+" warpDownReduce("+FloatTypeCpp+" value){
+                #pragma unroll
 	            for (int i = 16; i>0; i = i / 2) value += __shfl_down(value, i);
 	            return value;
             }
@@ -1008,6 +1016,7 @@ type DeviceMaxColumnActivationModule() =
             #define INIT __int_as_float(0xff800000) // The constant init for the reduce operations. This is float negative infinity.
             // The max reduce version.
             __device__ inline "+FloatTypeCpp+" warpReduce("+FloatTypeCpp+" value){
+                #pragma unroll
 	            for (int i=1; i<32; i*=2) {
                     "+FloatTypeCpp+" tmp = __shfl_xor(value, i);
                     value = (tmp > value) ? tmp : value;
@@ -1077,6 +1086,177 @@ type DeviceMaxColumnActivationModule() =
     member t.A(x: dMatrix) =
         let o = dMatrix.create(x.num_rows,x.num_cols)
         t.A(x.dArray,o.dArray,x.num_rows,x.num_cols)
+        o
+
+/// o <- max_k(tranpose_if(x))
+/// Sets all except the k number of max of a column to zero.
+/// Unlike for the other modules, to ensure it works swiftly, the column size and the number of iterations is fixed so the compiler can unroll the loops.
+type DeviceMaxSelectColumnActivationModule(column_size: int) = 
+    let block_size_x = 32 // This should not be changed for this module. Small block sizes such as these are much more efficient on Maxwell.
+    let block_size_y = 16 // This should be a mutliple of 2. On the GTX 970, 16 seems to work best, although 4,8,16,32 are quite close.
+
+    let kernel_code = "
+        //Kernel code:
+        extern \"C\" {
+            #define INIT_MIN __int_as_float(0xff800000) // The constant init for the reduce operations. This is the float negative infinity.
+            #define INIT_MAX __int_as_float(0x7f800000) // The constant init for the reduce operations. This is the float positive infinity.
+            #define NUM_VARS "+string (divup column_size 32)+" // This is to ensure that the number of variables is encoded as a constant.
+            #define NUM_COLS_32 "+string ((divup column_size 32)*32)+" // The column size has to be static for the shared memory array. This also to ensures it is a multiple of 32.
+            #define BLOCK_SIZE_Y "+string block_size_y+" // I am not sure whether gridDim.x is a compile time constant. It was not in Alea.
+            #define ROW_ITERS "+string (divup 32 block_size_y)+" // The number of iterations that should be done across the rows in shared memory.
+            typedef "+FloatTypeCpp+" floatType;
+            // The max reduce version.
+            __device__ inline floatType warpReduce(floatType value){
+                #pragma unroll
+	            for (int i=1; i<32; i*=2) {
+                    floatType tmp = __shfl_xor(value, i);
+                    value = (tmp > value) ? tmp : value;
+                    }
+	            return value;
+            }
+              
+            // Device code
+            __global__ void Kernel(const floatType* A, floatType* O, const int num_rows, const int num_cols, const int k, const int transpose)
+            {
+                if (transpose) {
+                    __shared__ floatType ar[32][NUM_COLS_32]; 
+                    // The reason why the second dimension is a mutliple of 32 is so that in the warp reduction phase, there are no inactive threads.
+                    // Inactive threads during the warp shuffle give undefined values. One has to go an extra mile to ensure that they are defined.
+                    {
+                    const int row = threadIdx.x;
+                    const int row_idx = row+blockIdx.x*32;
+                    #pragma unroll // Unroll the loops for performance, though it probably will not work on this part as the col = threadIdx.y is non static.
+                    for (int col = threadIdx.y; col < NUM_COLS_32; col += BLOCK_SIZE_Y) { // Stores everything into shared memory first by reading from the global in a contiguous manner.
+                            ar[row][col] = (row_idx < num_rows && col < num_cols) ? A[row_idx+col*num_rows] : INIT_MIN;
+                        }
+                    }
+                    __syncthreads();
+                
+                    floatType vars[NUM_VARS]; // The local array size needs to be made constant so the variables there get stored into registers instead of being spilled into global memory.
+                    #pragma unroll // Unroll the loop for performance. All the variables in the loop conditional are static.
+                    for (int row_iter=0; row_iter < ROW_ITERS; row_iter++) { 
+                    
+                        // This loop does max selection on the rows in shared memory.
+                        // Unlike for the global memory, not only is shared memory much faster, but it does not need to be read 
+                        // contiguosly to hit peak performance.
+
+                        // From shared memory, I put it into the local register memory and operate on that for even further speed gains.
+                        // This transposed kernel is adapted from the one in the other branch by adding the shared memory steps.
+
+                        floatType upper_bound = INIT_MAX; // This is the positive infinity for floats.
+                        floatType lower_bound = INIT_MIN; // This is the negative infinity for floats.
+
+                        #pragma unroll // Loop unrolling for improved performance. For this to work the number of unrolls has to be defined as a constant.
+                        for (int i=0; i < NUM_VARS;i++) { 
+                            const int col = threadIdx.x + i*32;
+                            const int row_idx = threadIdx.y + row_iter*BLOCK_SIZE_Y;
+                            if (row_idx < 32) vars[i] = ar[row_idx][col];
+                        }
+                        for (int iters=1; iters <= k; iters++){
+                            #pragma unroll
+                            for (int i=0; i < NUM_VARS;i++) { 
+                                if (vars[i] < upper_bound && lower_bound < vars[i]) lower_bound = vars[i];
+                            }
+                            upper_bound = warpReduce(lower_bound); // Lowers the upper bound.
+                            lower_bound = INIT_MIN;
+                        }
+                        #pragma unroll
+                        for (int i=0; i < NUM_VARS;i++) { 
+                            const int col = threadIdx.x + i*32;
+                            const int row_idx = threadIdx.y + row_iter*BLOCK_SIZE_Y;
+                            if (row_idx < 32) ar[row_idx][col] = (vars[i] < upper_bound) ? 0.0f : vars[i];
+                        }
+                    }
+                    __syncthreads();
+
+                    {
+                    const int row = threadIdx.x;
+                    const int row_idx = row+blockIdx.x*32;
+                    #pragma unroll
+                    for (int col = threadIdx.y; col < NUM_COLS_32; col += BLOCK_SIZE_Y) {
+                        if (row_idx < num_rows && col < num_cols) O[row_idx+col*num_rows] = ar[row][col];
+                        }
+                    }
+                }
+                else { // Does not need a to do a tranpose so it reads directly off global memory.
+                    //int row = threadIdx.x;
+                    //const int col = blockIdx.x;
+                    const int col_idx = blockIdx.x*num_rows; 
+                    floatType upper_bound = INIT_MAX; // This is the positive infinity for floats.
+                    floatType lower_bound = INIT_MIN; // This is the negative infinity for floats.
+                
+                    floatType vars[NUM_VARS]; // The local array size needs to be made constant so the variables there get stored into registers instead of being spilled into global memory.
+
+                    #pragma unroll // Loop unrolling for improved performance. For this to work the number of unrolls has to be defined as a constant.
+                    for (int i=0; i < NUM_VARS;i++) { 
+                        const int row = threadIdx.x + i*32;
+                        const int idx = row+col_idx;
+                        vars[i] = (row < num_rows) ? A[idx] : INIT_MIN;
+                    }
+                    for (int iters=1; iters <= k; iters++){
+                        #pragma unroll
+                        for (int i=0; i < NUM_VARS;i++) { 
+                            const int row = threadIdx.x + i*32;
+                            if (vars[i] < upper_bound && lower_bound < vars[i]) lower_bound = vars[i];
+                        }
+                        upper_bound = warpReduce(lower_bound); // Lowers the upper bound.
+                        lower_bound = INIT_MIN;
+                    }
+                    #pragma unroll
+                    for (int i=0; i < NUM_VARS;i++) { 
+                        const int row = threadIdx.x + i*32;
+                        const int idx = row+col_idx;
+                        if (row < num_rows){
+                            O[idx] = (vars[i] < upper_bound) ? 0.0f : vars[i];
+                        }
+                    }
+                }
+            }
+        }
+
+        "
+    let k = new ManagedCuda.NVRTC.CudaRuntimeCompiler(kernel_code,"Kernel")
+    do  
+        try k.Compile([|"-arch=compute_30"|])
+        with 
+        | :? NVRTCException as x -> 
+            printfn "%s" (k.GetLogAsString())
+            reraise()
+
+    let kernel = ctx.LoadKernelPTX(k.GetPTX(),"Kernel")
+
+    member t.AT(x: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>, m:int, n: int, k: int) =
+        kernel.GridDimensions <- dim3(divup m 32)
+        kernel.BlockDimensions <- dim3(block_size_x,block_size_y)
+        kernel.RunAsync(str.Stream,x.DevicePointer,o.DevicePointer,m,n,k,1) |> ignore
+
+    /// Does a transpose in shared memory first.
+    member t.AT(x: dMatrix, k, o: dMatrix) =
+        if x.rc <> o.rc then failwith "x.rc <> o.rc"
+        if x.num_cols <> column_size then failwith "Wrong num_cols."
+        t.AT(x.dArray,o.dArray,x.num_rows,x.num_cols,k)
+
+    /// Does a transpose in shared memory first.
+    member t.AT(x: dMatrix, k) =
+        let o = dMatrix.create(x.num_rows,x.num_cols)
+        if x.num_cols <> column_size then failwith "Wrong num_cols."
+        t.AT(x.dArray,o.dArray,x.num_rows,x.num_cols,k)
+        o
+
+    member t.A(x: CudaDeviceVariable<floatType>, o: CudaDeviceVariable<floatType>, m:int, n: int, k: int) =
+        kernel.GridDimensions <- dim3(n)
+        kernel.BlockDimensions <- dim3(block_size_x)
+        kernel.RunAsync(str.Stream,x.DevicePointer,o.DevicePointer,m,n,k,0) |> ignore
+
+    member t.A(x: dMatrix, k, o: dMatrix) =
+        if x.rc <> o.rc then failwith "x.rc <> o.rc"
+        if divup x.num_rows 32 <> divup column_size 32 then failwith "Wrong num_rows."
+        t.A(x.dArray,o.dArray,x.num_rows,x.num_cols,k)
+
+    member t.A(x: dMatrix, k) =
+        let o = dMatrix.create(x.num_rows,x.num_cols)
+        if divup x.num_rows 32 <> divup column_size 32 then failwith "Wrong num_rows."
+        t.A(x.dArray,o.dArray,x.num_rows,x.num_cols,k)
         o
 
 type Df_rec = {
@@ -1411,6 +1591,29 @@ let matmult (a: DM) (b:DM) =
     let t = DM.create(node,ff,fb)
     tape.Add(t)
     t
+
+/// Matrix-matrix multiply with the first argument transposed.
+let matmultTN (a: DM) (b:DM) =
+    let va = a.r.P
+    let vb = b.r.P
+    let el = a.r.A
+    let er = b.r.A
+
+    let node = tape.GetDMIf
+    let c = node.P
+    let error = node.A
+        
+    let ff () = 
+        let nr = (va).num_cols
+        let nc = (vb).num_cols
+        node.Resize nr nc
+        gemm2 T nT 1.0f va vb 0.0f c
+    let fb () = 
+        if a.r.is_constant = false then gemm2 nT T 1.0f vb error 1.0f el// The derivative with respect to the left. So the above argument gets inserted from the right left. Usually error * input.
+        if b.r.is_constant = false then gemm2 nT nT 1.0f va error 1.0f er// The derivative with respect to the right. So the above argument gets inserted from the right side. Usually weights * error.
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
     
 
 /// Addition with broadcasting.
@@ -1549,6 +1752,40 @@ let inline relu x = clip 0.0f Single.PositiveInfinity x 0.0f
 let inline clipped_linear_sigmoid x = clip -0.4999f 0.4999f x 0.5f // Clipped linear sigmoid in the [0.001,0.999] range.
 let inline linear_sigmoid x = clip -0.5f 0.5f x 0.0f // Linear sigmoid in the [0.0,1.0] range.
 let inline linear_tanh x = clip -1.0f 1.0f x 0.0f // Linear tanh in the [-1.0,1.0] range.
+
+
+let DeviceMaxSelectDict = lazy Dictionary<int,DeviceMaxSelectColumnActivationModule>()
+/// o <- max_k(x)
+/// Sets all except the k number of max of a column to zero.
+/// Unlike for the other modules, to ensure it works swiftly, the column size and the number of iterations is fixed so the compiler can unroll the loops.
+/// This name is for a function wrapper for the Dict that holds the DeviceMaxSelectColumnActivation modules.
+let DeviceMaxSelectColumnActivationModule column_size =
+    let d = DeviceMaxSelectDict.Value
+    if d.ContainsKey(divup column_size 32) then
+        d.[divup column_size 32]
+    else
+        let t = DeviceMaxSelectColumnActivationModule column_size
+        d.Add(divup column_size 32,t)
+        t
+
+/// The winner take all activation. Zeroes out the non top-k values along the row.
+let sparseActivationErrorModule = lazy new DeviceTrinaryTransformModule "y*((x == 0.0f) ? 0.0f : 1.0f)+z;"
+let WTA k (a:DM) =
+    let va = a.r.P
+    let el = a.r.A
+
+    let node = tape.GetDMIf
+    let c = node.P
+    let error = node.A
+
+    let ff () = 
+        let nr,nc = (va).rc
+        node.Resize nr nc
+        DeviceMaxSelectColumnActivationModule(nc).AT(va,k,c)
+    let fb () = sparseActivationErrorModule.Value.A(c,error,el,el)
+    let t = DM.create(node,ff,fb)
+    tape.Add(t)
+    t
 
 
 let add alpha (a: DM) beta (b: DM) =
@@ -1721,6 +1958,10 @@ let get_accuracy targets activations =
     maxColumnModule.Value.A(activations,o.P)
     accuracyModule.Value.A(targets,o.P)
 
+type IFeedforwardLayer =
+    abstract runLayer: DM -> DM
+    abstract ToArray: DM[]
+
 // A feedforward layer of neurons
 type FeedforwardLayer =
     {
@@ -1729,9 +1970,6 @@ type FeedforwardLayer =
     a:DM->DM
     } with     // Activation function
      
-    member l.ToArray = 
-        [|l.W;l.b|]
-
     static member fromArray (a : DM[]) act =
         {
          W = a.[0]
@@ -1748,6 +1986,47 @@ type FeedforwardLayer =
 
     member l.runLayer (x:DM) =
         linear_layer_matmult [|l.W,x|] (Some l.b) |> l.a
+
+    member l.ToArray = 
+        [|l.W;l.b|]
+
+    interface IFeedforwardLayer with
+        member l.runLayer (x:DM) = l.runLayer x
+        member l.ToArray = l.ToArray
+            
+
+// An inverse feedforward layer of neurons made from a regular one. Used in autoencoders
+type InverseFeedforwardLayer =
+    {
+    W:DM  // Input weight matrix
+    b:DM  // Bias vector
+    a:DM->DM
+    } with     // Activation function
+     
+    member l.ToArray = 
+        [|l.W;l.b|]
+
+    static member fromArray (a : DM[]) act =
+        {
+         W = a.[0]
+         b = a.[1]
+         a = act
+        }
+
+    static member createRandomLayer (l: FeedforwardLayer) act =
+        {
+         W = l.W
+         b = DM.makeUniformRandomNode(l.W.r.P.num_cols, 1)
+         a = act
+        } 
+
+    member l.runLayer (x:DM) =
+        addb (matmultTN l.W x) l.b |> l.a
+
+    interface IFeedforwardLayer with
+        member l.runLayer (x:DM) = l.runLayer x
+        member l.ToArray = l.ToArray
+
 
 // A recurrent layer of neurons
 type Layer =
@@ -2005,3 +2284,39 @@ type LSTMLayer =
         let c' = linear_layer [||] [|block_input,input_gate;c,forget_gate|] None
         let output_gate = linear_layer [|l.U_o,y;l.P_o,c'|] [||] (Some l.b_o) |> sigmoid
         hadmult (l.block_output_a c') output_gate, c'
+
+open System.Drawing
+
+let make_bitmap_from_dmatrix (imageset : dMatrix) row_size col_size num_rows num_cols =
+    let map_slice_to_bitmap (slice : float32 []) (bitmap : Bitmap) start_x end_x start_y end_y =
+        let mutable slice_ind = 0
+        for x=start_x to end_x do
+            for y=start_y to end_y do
+                let c = int (slice.[slice_ind])
+                slice_ind <- slice_ind+1
+                let color = Color.FromArgb(c,c,c)
+                bitmap.SetPixel(y,x,color) 
+    let float_array = imageset.dArray.Gather()
+    let format = System.Drawing.Imaging.PixelFormat.Format24bppRgb
+    let bitmap_digit = new Bitmap(col_size*num_cols,row_size*num_rows,format)
+    let mutable digits = 0
+    for x=0 to num_rows-1 do
+        for y=0 to num_cols-1 do
+            let start_slice = digits*imageset.num_rows
+            let end_slice = (digits+1)*imageset.num_rows-1
+            let slice = float_array.[start_slice..end_slice]
+            digits <- digits+1
+
+            // Normalization steps for each column.
+            let norm = sqrt(slice |> Array.fold (fun state x -> state + x*x) 0.0f)
+            let normed_slice = slice |> Array.map ( fun x -> (x / norm) * 127.0f + 127.0f)
+
+            let start_x = x*row_size
+            let end_x = start_x+row_size-1
+            let start_y = y*col_size
+            let end_y = start_y+col_size-1
+
+            if (end_x-start_x+1)*(end_y-start_y+1) <> imageset.num_rows then failwith "(end_x-start_x+1)*(end_y-start_y+1) <> imageset.num_rows"
+
+            map_slice_to_bitmap normed_slice bitmap_digit start_x end_x start_y end_y
+    bitmap_digit

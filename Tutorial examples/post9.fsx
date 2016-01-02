@@ -113,6 +113,6 @@ let r = [|for _,r in s do yield r|]
 
 (Chart.Combine [|Chart.Line l;Chart.Line r|]).ShowChart()
 
-let bitmap = make_bitmap_from_dmatrix (transpose l1.W.r.P) 28 28 25 40 // Don't mind the tranpose.
+let bitmap = make_bitmap_from_dmatrix l1.W.r.P 28 28 25 40 // Don't mind the tranpose.
 bitmap.Save(__SOURCE_DIRECTORY__ + @"\weights2.png")
 

@@ -2287,7 +2287,9 @@ type LSTMLayer =
 
 open System.Drawing
 
+/// Makes a bitmap from dMatrix.
 let make_bitmap_from_dmatrix (imageset : dMatrix) row_size col_size num_rows num_cols =
+    use imageset = transpose imageset
     let map_slice_to_bitmap (slice : float32 []) (bitmap : Bitmap) start_x end_x start_y end_y =
         let mutable slice_ind = 0
         for x=start_x to end_x do

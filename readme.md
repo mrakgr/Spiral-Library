@@ -2,4 +2,4 @@ The spiral library is made for the purpose of assisting machine learning applica
 
 For more information see <a href="https://abstractcontrol.wordpress.com/2015/12/24/introduction/">here</a>.
 
-License: GPL 3.
+License: LGPL 3.

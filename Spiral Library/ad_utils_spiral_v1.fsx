@@ -1761,7 +1761,7 @@ let inline relu x = clip 0.0f Single.PositiveInfinity x 0.0f
 
 // The linear versions of the sigmoid and tanh.
 let inline clipped_linear_sigmoid x = clip -0.4999f 0.4999f x 0.5f // Clipped linear sigmoid in the [0.001,0.999] range.
-let inline linear_sigmoid x = clip -0.5f 0.5f x 0.0f // Linear sigmoid in the [0.0,1.0] range.
+let inline linear_sigmoid x = clip -0.5f 0.5f x 0.5f // Linear sigmoid in the [0.0,1.0] range.
 let inline linear_tanh x = clip -1.0f 1.0f x 0.0f // Linear tanh in the [-1.0,1.0] range.
 
 
@@ -2138,6 +2138,7 @@ type GRULayer =
         let potential_new_state = linear_layer [|l.W_n,x;l.U_n, (hadmult reset_gate y)|] [||] (Some l.b_n) |> l.a
         linear_layer [||] [|update_gate,y;(scalar_matrix_add 1.0f -1.0f update_gate),potential_new_state|] None
 
+// Does gradient clipping in addition to adding weight adjoints to primals.
 let add_gradients_to_weights (base_nodes: DM[]) learning_rate clip_coef = 
     for x in base_nodes do 
         gradclipModule.Value.A(clip_coef,x.r.A,x.r.A)

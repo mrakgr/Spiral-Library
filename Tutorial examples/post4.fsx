@@ -212,7 +212,6 @@ let geam2 transa transb (alpha: floatType) (A:dMatrix) beta (B:dMatrix) (C:dMatr
 
 let inline transpose t = geam T T 1.0f t 0.0f t // Transpose function
 
-
 let biasTensorDesc = new TensorDescriptor()
 let dstTensorDesc = new TensorDescriptor()
 let SpiralCuDNNDataType = 

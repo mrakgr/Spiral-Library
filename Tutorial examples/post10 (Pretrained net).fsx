@@ -1,4 +1,5 @@
 ﻿// Spiral reverse AD example. Used for testing.
+// The pretrained net example.
 #load "../Spiral Library/ad_utils_spiral_v1.fsx"
 open Ad_utils_spiral_v1
 
@@ -53,7 +54,7 @@ let dtest = make_set test_data 128
 let l1 = FeedforwardLayer.createRandomLayer 1024 784 (WTA 6)
 let l2 = FeedforwardLayer.createRandomLayer 1024 1024 (WTA 6)
 let l3 = FeedforwardLayer.createRandomLayer 1024 1024 (WTA 6)
-let l4 = InverseFeedforwardLayer.createRandomLayer l3 (fun x -> x) // No nonlinearity at the end. With a steep sigmoid the cost is much better, but the visualizations are less crisp.
+let l4 = InverseFeedforwardLayer.createRandomLayer l3 (fun x -> x) // No nonlinearity at the end. Linearities in the final layet cause the individual layers to overfit too badly.
 let l5 = InverseFeedforwardLayer.createRandomLayer l2 (fun x -> x)
 let l6 = InverseFeedforwardLayer.createRandomLayer l1 (fun x -> x)
 
@@ -62,13 +63,13 @@ let l2' = FeedforwardLayer.fromArray l2.ToArray relu
 let l3' = FeedforwardLayer.fromArray l3.ToArray relu
 let l_sig = FeedforwardLayer.createRandomLayer 10 1024 (clipped_steep_sigmoid 3.0f)
 
-let layers_deep_autoencoder = [|[|l1;l2;l3|] |> Array.map (fun x -> x :> IFeedforwardLayer);[|l4;l5;l6|] |> Array.map (fun x -> x :> IFeedforwardLayer);|] |> Array.concat // Upcasting to the base type. The correct functions will get called with dynamic dispatch.
+let layers_deep_autoencoder = [|[|l1;l2;l3|] |> Array.map (fun x -> x :> IFeedforwardLayer);[|l4;l5;l6|] |> Array.map (fun x -> x :> IFeedforwardLayer);|] |> Array.concat // Upcasting to the base type. The deep autoencoder is not used in this example, but only serves an illustration here.
 let layers_1 = [|[|l1|] |> Array.map (fun x -> x :> IFeedforwardLayer);[|l6|] |> Array.map (fun x -> x :> IFeedforwardLayer);|] |> Array.concat // Upcasting to the base type. The correct functions will get called with dynamic dispatch.
 let layers_2 = [|[|l1;l2|] |> Array.map (fun x -> x :> IFeedforwardLayer);[|l5|] |> Array.map (fun x -> x :> IFeedforwardLayer);|] |> Array.concat // Upcasting to the base type. The correct functions will get called with dynamic dispatch.
 let layers_3 = [|[|l1;l2;l3|] |> Array.map (fun x -> x :> IFeedforwardLayer);[|l4|] |> Array.map (fun x -> x :> IFeedforwardLayer);|] |> Array.concat // Upcasting to the base type. The correct functions will get called with dynamic dispatch.
 let layers_fine_tune = [|l1';l2';l3';l_sig|] |> Array.map (fun x -> x :> IFeedforwardLayer)
 
-let loop_1 data targets = // These loops are closures. I'll pass them into the function instead of the layers. This one is for the first autoencoder
+let loop_1 data targets = // These loops are closures. They are not called directly, but passed as parameters into the training function. This one is for the first autoencoder
     let outputs = Array.scan(fun state (layer:IFeedforwardLayer) -> (layer.runLayer state)) data layers_1 // Scan is like fold except it returns the intermediates.
     let inp = outputs.[outputs.Length-3]
     let out = outputs.[outputs.Length-1]
@@ -157,10 +158,15 @@ let train_mnist_sgd num_iters learning_rate training_loop (layers: IFeedforwardL
 let mutable loop_iter = 1
 
 // For the autoencoders it seems 0.1f is a decent learning rate.
-// They blow up with 0.2f.
+// The autoencoders blow up with 0.2f.
 // The lower learning rate in the final layer does not help, in fact the higher does.
 // My record here is 99.1% after a few hours of playing around.
 // Might be possible to do even better with max norm normalization.
+
+// This layerwise pretraining is an old technique by now.
+// Here is the more up to date research on this old idea: 
+// GradNets - http://arxiv.org/abs/1511.06827
+// Net2Net - http://arxiv.org/abs/1511.05641
 for loop,layers,num_iters,learning_rate in [|loop_1,layers_1,10,0.1f;loop_2,layers_2,10,0.1f;loop_3,layers_3,10,0.1f;loop_3b,layers_fine_tune,10,0.1f;loop_fine_tune,layers_fine_tune,30,0.2f|] do
     printfn "Starting training loop %i..." loop_iter
     let s = train_mnist_sgd num_iters learning_rate loop layers

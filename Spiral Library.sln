@@ -12,14 +12,17 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution 
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tutorial Examples", "Tutorial Examples", "{2E1EFD51-A072-4E31-8C4B-7AFBD99D6B73}"
 	ProjectSection(SolutionItems) = preProject
+		Tutorial examples\embedded_reber.fsx = Tutorial examples\embedded_reber.fsx
+		Tutorial examples\post10 (Pretrained net).fsx = Tutorial examples\post10 (Pretrained net).fsx
 		Tutorial examples\load_mnist.fsx = Tutorial examples\load_mnist.fsx
-		Tutorial examples\post10.fsx = Tutorial examples\post10.fsx
+		Tutorial examples\post11 (LSTM example).fsx = Tutorial examples\post11 (LSTM example).fsx
 		Tutorial examples\post3.fsx = Tutorial examples\post3.fsx
 		Tutorial examples\post4.fsx = Tutorial examples\post4.fsx
 		Tutorial examples\post5.fsx = Tutorial examples\post5.fsx
-		Tutorial examples\post6.fsx = Tutorial examples\post6.fsx
-		Tutorial examples\post8.fsx = Tutorial examples\post8.fsx
-		Tutorial examples\post9.fsx = Tutorial examples\post9.fsx
+		Tutorial examples\post6 (Basics of AD).fsx = Tutorial examples\post6 (Basics of AD).fsx
+		Tutorial examples\post7.fsx = Tutorial examples\post7.fsx
+		Tutorial examples\post8 (Feedforward net).fsx = Tutorial examples\post8 (Feedforward net).fsx
+		Tutorial examples\post9 (WTA autoencoder).fsx = Tutorial examples\post9 (WTA autoencoder).fsx
 	EndProjectSection
 EndProject
 Global

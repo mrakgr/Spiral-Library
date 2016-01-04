@@ -60,6 +60,7 @@
     <None Include="cross_entropy_xor_test.fsx" />
     <None Include="batched_test.fsx" />
     <None Include="deviceMaxIndexModule.fsx" />
+    <Content Include="TODO.txt" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="CudaBlas">

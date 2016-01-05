@@ -1119,7 +1119,7 @@ type DeviceMaxSelectColumnActivationModule(column_size: int) =
             __global__ void Kernel(const floatType* A, floatType* O, const int num_rows, const int num_cols, const int k, const int transpose)
             {
                 if (transpose) {
-                    __shared__ floatType ar[32][NUM_COLS_32]; 
+                    __shared__ floatType ar[32][NUM_COLS_32+1];
                     // The reason why the second dimension is a mutliple of 32 is so that in the warp reduction phase, there are no inactive threads.
                     // Inactive threads during the warp shuffle give undefined values. One has to go an extra mile to ensure that they are defined.
                     {

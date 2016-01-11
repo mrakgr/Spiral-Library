@@ -1,6 +1,4 @@
-﻿Spiral TODO:
-
-Create the optimized nonlinear layers for relu,sigmoid and tanh.
+﻿Create the optimized nonlinear layers for relu,sigmoid and tanh.
 Optimize squared sum and cross entropy.
 Create the TN layers.
 Add the softmax loss. It can be found in cuDNN.
@@ -9,5 +7,7 @@ Add hinge loss. Make a tutorial for it.
 Add convolutional functions. Make a tutorial for them.
 Add optimizers like <del>NAG</del>, Adam and RMSProp. Rprop for old times sake as well.
 Add the tile kernels and their associated DM functions. They are already finished and in the DiffSharp Cuda backend.
-Optimize AddBias so it draws descriptors from the buffer.
+Optimize cuDNN functions so they draw descriptors from the buffer.
 Add dropout.
+Replace bad memoization with the elegant function found on SO.
+Deprecate the separate forward pass. Adjust the tutorial files.

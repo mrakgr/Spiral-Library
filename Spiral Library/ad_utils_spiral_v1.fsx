@@ -2159,8 +2159,8 @@ let nesterov_add_gradients (base_nodes: DM[]) (momentum_matrices: dMatrix[]) (co
         geam2 nT nT 1.0f c momentum_rate m x.r.P // Apply Nesterov's momentum to the weights. It is really the copy weights that serve as the basis.
 
 let save_data filename (ar: DM []) =
-    let stream_data = File.OpenWrite(filename)
-    let writer_data = new BinaryWriter(stream_data)
+    use stream_data = File.OpenWrite(filename)
+    use writer_data = new BinaryWriter(stream_data)
 
     // Magic number
     writer_data.Write(929856)
@@ -2172,12 +2172,10 @@ let save_data filename (ar: DM []) =
         let t = (x.r.P).dArray.Gather()
         for f in t do writer_data.Write(f)
 
-    writer_data.Close()
-    stream_data.Close()
 
 let load_data file_name is_constant =
-    let stream_data = File.OpenRead(file_name)
-    let reader_data = new BinaryReader(stream_data)
+    use stream_data = File.OpenRead(file_name)
+    use reader_data = new BinaryReader(stream_data)
 
     let m = reader_data.ReadInt32()
     if m <> 929856 then failwith "Wrong file type in load_weights"
@@ -2193,8 +2191,6 @@ let load_data file_name is_constant =
             | false -> yield DM.makeNode(num_rows,num_cols,ar)
         |]
 
-    reader_data.Close()
-    stream_data.Close()
     weights
 
 type LSTMLayer =

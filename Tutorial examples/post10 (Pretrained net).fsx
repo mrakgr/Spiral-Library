@@ -106,9 +106,8 @@ let loop_fine_tune data targets = // The full net with the pretrained weights.
     cross_entropy_cost targets outputs, Some (lazy get_accuracy targets.r.P outputs.r.P)
 
 // It might be possible to get more speed by not repeating needless calculations in the lower layers, but that would require switching
-// branches and some modifying the training loop, but this is decent enough.
+// branches and some modifying the training loop, so this is decent enough.
 // Doing it like this is in fact the most effiecient from a memory standpoint.
-
 let train_mnist_sgd num_iters learning_rate training_loop (layers: IFeedforwardLayer[]) =
     [|
     let mutable r' = 0.0f

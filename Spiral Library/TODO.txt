@@ -11,3 +11,5 @@ Optimize cuDNN functions so they draw descriptors from the buffer.
 Add dropout.
 Replace bad memoization with the elegant function found on SO.
 Deprecate the separate forward pass. Adjust the tutorial files.
+Create a system for the Cuda modules precompilation. PRIORITY.
+Remove all those inneficient string concatenations.

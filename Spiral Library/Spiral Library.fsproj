@@ -51,16 +51,11 @@
   <Import Project="$(FSharpTargetsPath)" />
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
-    <None Include="ad_utils_spiral_v1.fsx" />
     <Content Include="packages.config" />
     <None Include="readme.md" />
     <Content Include="LICENSE.txt" />
-    <None Include="dump.fsx" />
-    <None Include="dump_branching.fsx" />
-    <None Include="cross_entropy_xor_test.fsx" />
-    <None Include="batched_test.fsx" />
-    <None Include="deviceMaxIndexModule.fsx" />
     <Content Include="TODO.txt" />
+    <None Include="ad_utils_spiral_v1.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="CudaBlas">
